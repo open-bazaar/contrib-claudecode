@@ -1,0 +1,47 @@
+[project]
+name = "bazaar-contrib-claude-code"
+version = "0.3.0rc1"
+description = "Claude Code stream-json harness provider for Bazaar Compute Node"
+requires-python = ">=3.15"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+dependencies = [
+    "bazaar-core~=0.3.0rc10",
+    "bazaar-contrib-harness~=0.3.0rc10",
+    "bazaar-contrib-audit~=0.3.0rc10",
+    "bazaar-contrib-timer~=0.3.0rc10",
+    "psutil>=7.0.0",
+    "pydantic>=2.12.0",
+    "watchfiles>=1.3.0",
+]
+
+[project.urls]
+Repository = "https://github.com/open-bazaar/contrib-claudecode"
+
+[project.entry-points."bazaar_compute_node.contribs"]
+claudecode-builder = "bazaar_contrib_claude_code:builder"
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = ["bazaar-compute-node>=0.3.0rc10,<0.4", "bcn-claude-test-channel", "blockbuster>=1.5.29,<1.6", "ruff>=0.9.0", "pyright==1.1.414", "pytest>=8.3.0", "pytest-asyncio>=0.24.0", "psutil>=7.0.0", "tomli-w>=1.2.0"]
+
+[tool.uv.sources]
+bcn-claude-test-channel = { path = "tests/fixtures/channel", editable = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:anyio"
+asyncio_mode = "auto"
+markers = ["e2e: requires a real Claude Code CLI, model, and installed bcn application"]
+
+[tool.ruff.lint]
+extend-select = ["ASYNC"]
+
+[tool.pyright]
+include = ["src", "tests"]
+typeCheckingMode = "basic"
+pythonVersion = "3.15"

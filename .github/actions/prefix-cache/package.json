@@ -1,0 +1,8 @@
+{
+  "name": "bcn-prefix-cache",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@actions/cache": "6.3.0"
+  }
+}

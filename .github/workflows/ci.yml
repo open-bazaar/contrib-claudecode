@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - name: Setup uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: '0.13.0'
+      - name: Install
+        run: uv sync --python 3.15 --prerelease allow
+      - name: Lint
+        run: uv run --no-sync ruff check .
+      - name: Format
+        run: uv run --no-sync ruff format --check .
+      - name: Types
+        run: uv run --no-sync pyright
+      - name: Process cleanup
+        run: uv run --no-sync pytest -q tests/test_process_cleanup.py
+      - name: Build
+        run: uv build --no-sources
+
+  e2e:
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario:
+          - mcp-once
+          - bcc
+          - full-access
+          - recovery
+          - refresh
+          - background
+    name: e2e (${{ matrix.scenario }})
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - name: Setup uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: '0.13.0'
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - name: Install Claude Code
+        run: npm install --global @anthropic-ai/claude-code@latest
+      - name: Version
+        run: claude --version
+      - name: Sandbox
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap socat
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Install
+        run: uv sync --python 3.15 --prerelease allow
+      - name: Preheat image
+        run: |
+          for attempt in 1 2 3; do
+            if docker pull node:24.18.0-bookworm-slim; then
+              exit 0
+            fi
+          done
+          exit 1
+      - name: Install prefix cache client
+        run: npm ci --prefix .github/actions/prefix-cache
+      - name: Gateway
+        uses: yuchanns/setup-ai-gateway@564af746413273335294b725ff195acde1501f3d
+        id: gateway
+        with:
+          context-size: '131072'
+      - name: Test
+        uses: ./.github/actions/prefix-cache
+        env:
+          PYTHONUNBUFFERED: '1'
+        with:
+          scenario: ${{ matrix.scenario }}
+          model: ${{ steps.gateway.outputs.model }}
+      - name: Upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: bcc-acceptance-${{ matrix.scenario }}
+          path: |
+            .artifacts/gateway-resources.jsonl
+            .artifacts/preheat/
+            .artifacts/e2e/**/build-*.log
+            .artifacts/e2e/**/install.log
+            .artifacts/e2e/**/python.log
+            .artifacts/e2e/**/bcc.log
+            .artifacts/e2e/**/lifecycle.log
+            .artifacts/e2e/**/lifecycle/result.json
+            .artifacts/e2e/**/steering.log
+            .artifacts/e2e/**/steering/result.json
+            .artifacts/e2e/**/*-prepare.log
+            .artifacts/e2e/**/bootstrap.log
+            .artifacts/e2e/**/activation.log
+            .artifacts/e2e/**/node.log
+            .artifacts/e2e/**/audit.jsonl
+            .artifacts/e2e/**/full-access-note.txt
+          include-hidden-files: true
+          if-no-files-found: warn
