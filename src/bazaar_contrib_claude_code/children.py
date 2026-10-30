@@ -1,6 +1,6 @@
 """The runtime processes this provider started and that have not ended: when
 going down runs out of time, the node ends them itself before it exits, so
-none is left running without it. Each is started in a group of its own, so
+none is left running without it. Each has its own group or Windows Job, so
 what it starts in turn ends with it."""
 
 from __future__ import annotations
@@ -16,16 +16,20 @@ from typing import Any
 import psutil
 from bazaar_contrib_timer import Timer
 
+if sys.platform == "win32":
+    from .windows_job import CREATE_SUSPENDED, WindowsJob
+
 # how long a runtime asked to end gets before it is killed
 END_GRACE_SECONDS = 2.0
 
 
 def own_group() -> dict[str, Any]:
     """What `create_subprocess_exec` takes to start a process in a group of
-    its own: the terminal's Ctrl-C does not reach it, the node ends it."""
+    its own: the terminal's Ctrl-C does not reach it, the node ends it.
+    On Windows, Children.started assigns the suspended process before resuming."""
 
     if sys.platform == "win32":
-        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | CREATE_SUSPENDED}
     return {"start_new_session": True}
 
 
@@ -34,9 +38,17 @@ class Children:
         self.timer = timer
         self._running: set[int] = set()
         self._reapers: set[asyncio.Task[None]] = set()
+        if sys.platform == "win32":
+            self._jobs: dict[int, WindowsJob] = {}
 
     def started(self, pid: int) -> None:
         self._running.add(pid)
+        if sys.platform == "win32":
+            # Own the entire family before the CLI can create any descendants.
+            job = WindowsJob()
+            self._jobs[pid] = job
+            job.assign(pid)
+            psutil.Process(pid).resume()
 
     def reaping(self, task: asyncio.Task[None]) -> None:
         self._reapers.add(task)
@@ -55,7 +67,11 @@ class Children:
         """A runtime is gone: what it started and left running goes with it, so
         nothing it began outlives it unregistered."""
 
-        if sys.platform != "win32":
+        if sys.platform == "win32":
+            if job := self._jobs.get(pid):
+                job.close()
+                del self._jobs[pid]
+        else:
             _signal_group(pid, signal.SIGKILL)
         for process in reversed(tree):
             try:

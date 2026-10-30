@@ -182,11 +182,11 @@ class ProcessSupervisor:
                         env=dict(self.spec.environment),
                         **own_group(),
                     )
+                self._process = process
+                self.children.started(process.pid)
             except BaseException:
                 self._state = ProcessState.FAILED
                 raise
-            self._process = process
-            self.children.started(process.pid)
             self._stdout_task = asyncio.create_task(
                 self._read_stdout(process), name="claude-code-stdout"
             )

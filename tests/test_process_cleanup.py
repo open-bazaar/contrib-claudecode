@@ -1,4 +1,4 @@
-"""A cancelled stop must retain a real detached descendant until cleanup."""
+"""Real descendants stay owned through parent exit and stop cancellation."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from typing import Any, cast
 from uuid import uuid4
 
 import psutil
+import pytest
 from bazaar_contrib_audit import AUDIT, AUDIT_EVENT, AuditContext, AuditEvent, audit
 from bazaar_core import Composition, Context, Contrib, ContribEntry, ContribHub
 
@@ -120,3 +121,132 @@ async def test_cancelled_stop_cleans_detached_descendant(tmp_path: Path):
         if event.event_name == "harness.source.closed"
     ]
     assert len(closed) == 1 and closed[0]["sequence"] == 1
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Job ownership")
+@pytest.mark.parametrize("orphaned", [False, True], ids=["child", "grandchild"])
+@pytest.mark.parametrize("ending", ["exit", "stop", "zero", "cancel"])
+async def test_windows_job_cleans_inherited_pipes(
+    tmp_path: Path, orphaned: bool, ending: str
+):
+    ready = asyncio.Event()
+    closed = asyncio.Event()
+    events: list[AuditEvent] = []
+    descendants: list[psutil.Process] = []
+    root_ready = False
+
+    async def record(ctx: Context, event: AuditEvent):
+        nonlocal root_ready
+        events.append(event)
+        if event.event_name == "harness.source.closed":
+            closed.set()
+        elif event.event_name == "harness.source.received":
+            payload = cast(dict[str, Any], event.payload)
+            data = payload["data"].strip()
+            if data.startswith("leaf:"):
+                descendants.append(psutil.Process(int(data.removeprefix("leaf:"))))
+            elif data == "root-ready":
+                root_ready = True
+            if descendants and root_ready:
+                ready.set()
+
+    @asynccontextmanager
+    async def exercise(ctx: Context):
+        children = Children()
+        leaf = (
+            "import os,sys,threading;"
+            "print('leaf stderr',file=sys.stderr,flush=True);"
+            "print('leaf:'+str(os.getpid()),flush=True);"
+            "threading.Event().wait()"
+        )
+        descendant = leaf
+        if orphaned:
+            descendant = (
+                "import subprocess,sys;"
+                f"subprocess.Popen([sys.executable,'-c',{leaf!r}],"
+                "stdin=subprocess.DEVNULL,"
+                "creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)"
+            )
+        script = (
+            "import subprocess,sys;"
+            f"child=subprocess.Popen([sys.executable,'-c',{descendant!r}],"
+            "stdin=subprocess.DEVNULL,"
+            "creationflags=subprocess.CREATE_NEW_PROCESS_GROUP);"
+            + ("assert child.wait()==0;" if orphaned else "")
+            + "print('root-ready',flush=True);"
+            "sys.exit(7 if sys.stdin.readline() else 0)"
+        )
+        supervisor = ProcessSupervisor(
+            ProcessSpec(sys.executable, ("-c", script), tmp_path, dict(os.environ)),
+            children,
+            source=SourceAudit(
+                ctx.accept(AUDIT),
+                AuditContext(
+                    agent_id="windows-process-cleanup",
+                    harness="claudecode",
+                    session_id=str(uuid4()),
+                ),
+            ),
+        )
+        try:
+            await supervisor.start(timeout=30)
+            await ready.wait()
+            if ending == "exit":
+                await supervisor.send(
+                    {"type": "user", "message": {"role": "user", "content": "exit"}}
+                )
+                assert await supervisor.wait() == 7
+            elif ending == "cancel":
+                stop = asyncio.create_task(supervisor.stop(timeout=600))
+                asyncio.get_running_loop().call_soon(stop.cancel)
+                with pytest.raises(asyncio.CancelledError):
+                    await stop
+            else:
+                await supervisor.stop(timeout=0 if ending == "zero" else 30)
+            await children.end_all()
+            await closed.wait()
+            assert len(descendants) == 1
+            assert not descendants[0].is_running()
+            yield
+        finally:
+            if supervisor.is_running:
+                await supervisor.stop(timeout=0)
+            await children.end_all()
+            for descendant_process in descendants:
+                try:
+                    descendant_process.kill()
+                except psutil.NoSuchProcess:
+                    pass
+            await asyncio.to_thread(psutil.wait_procs, descendants)
+
+    async with (
+        ContribHub() as hub,
+        hub.enable(
+            Composition(
+                entries=(
+                    ContribEntry(name="audit", definition=audit),
+                    ContribEntry(
+                        name="recorder",
+                        definition=Contrib(listen={AUDIT_EVENT: record}),
+                    ),
+                )
+            )
+        ),
+        hub.enable(
+            Composition(
+                entries=(
+                    ContribEntry(
+                        name="exercise",
+                        definition=Contrib(accepts=[AUDIT], lifespan=exercise),
+                    ),
+                )
+            )
+        ),
+    ):
+        pass
+    closures = [
+        event for event in events if event.event_name == "harness.source.closed"
+    ]
+    assert len(closures) == 1
+    payload = cast(dict[str, Any], closures[0].payload)
+    assert payload["sequence"] == (3 if ending == "exit" else 2)
