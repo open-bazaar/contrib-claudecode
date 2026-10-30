@@ -1,0 +1,138 @@
+"""The runtime processes this provider started and that have not ended: when
+going down runs out of time, the node ends them itself before it exits, so
+none is left running without it. Each is started in a group of its own, so
+what it starts in turn ends with it."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import signal
+import subprocess
+import sys
+from collections.abc import Sequence
+from typing import Any
+
+import psutil
+from bazaar_contrib_timer import Timer
+
+# how long a runtime asked to end gets before it is killed
+END_GRACE_SECONDS = 2.0
+
+
+def own_group() -> dict[str, Any]:
+    """What `create_subprocess_exec` takes to start a process in a group of
+    its own: the terminal's Ctrl-C does not reach it, the node ends it."""
+
+    if sys.platform == "win32":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
+class Children:
+    def __init__(self, timer: Timer | None = None):
+        self.timer = timer
+        self._running: set[int] = set()
+        self._reapers: set[asyncio.Task[None]] = set()
+
+    def started(self, pid: int) -> None:
+        self._running.add(pid)
+
+    def reaping(self, task: asyncio.Task[None]) -> None:
+        self._reapers.add(task)
+        task.add_done_callback(self._reapers.discard)
+
+    def snapshot(self, pid: int) -> tuple[psutil.Process, ...]:
+        # Cancellation must not kill the root before its descendants are captured.
+        try:
+            process = psutil.Process(pid)
+            descendants = process.children(recursive=True)
+        except psutil.NoSuchProcess:
+            return ()
+        return (process, *descendants)
+
+    def ended(self, pid: int, tree: Sequence[psutil.Process] = ()) -> None:
+        """A runtime is gone: what it started and left running goes with it, so
+        nothing it began outlives it unregistered."""
+
+        if sys.platform != "win32":
+            _signal_group(pid, signal.SIGKILL)
+        for process in reversed(tree):
+            try:
+                process.kill()
+            except psutil.NoSuchProcess:
+                pass
+        self._running.discard(pid)
+
+    async def wait(self, tree: Sequence[psutil.Process]) -> None:
+        remaining = list(tree)
+        while remaining:
+            _, remaining = await asyncio.to_thread(
+                psutil.wait_procs, remaining, timeout=0
+            )
+            if remaining:
+                if self.timer is None:
+                    await asyncio.sleep(0.05)
+                else:
+                    await self.timer.create(50).wait()
+
+    async def end_all(self) -> None:
+        """End every runtime still running, with what it started: asked first,
+        killed when it is still there after the grace."""
+
+        pids = tuple(self._running)
+        if not pids:
+            await asyncio.gather(*tuple(self._reapers), return_exceptions=True)
+            return
+        trees: dict[int, tuple[psutil.Process, ...]] = {}
+        try:
+            for pid in pids:
+                trees[pid] = self.snapshot(pid)
+            if sys.platform == "win32":
+                return
+            for pid in pids:
+                _signal_group(pid, signal.SIGTERM)
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + END_GRACE_SECONDS
+            roots = [tree[0] for tree in trees.values() if tree]
+            remaining = [process for tree in trees.values() for process in tree[1:]]
+            while loop.time() < deadline:
+                _, remaining = await asyncio.to_thread(
+                    psutil.wait_procs, remaining, timeout=0
+                )
+                if not remaining and not any(root.is_running() for root in roots):
+                    break
+                if self.timer is None:
+                    await asyncio.sleep(0.05)
+                else:
+                    await self.timer.create(50).wait()
+        finally:
+            for pid in pids:
+                self.ended(pid, trees.get(pid, ()))
+            await asyncio.gather(*tuple(self._reapers), return_exceptions=True)
+
+
+if sys.platform != "win32":
+
+    def _signal_group(pid: int, number: signal.Signals) -> None:
+        try:
+            os.killpg(pid, number)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            if sys.platform != "darwin" or _group_has_live_members(pid):
+                raise
+
+    def _group_has_live_members(pid: int) -> bool:
+        # Darwin also returns EPERM for a group containing only zombies. Check
+        # the kernel's process list before treating a permission error as exit.
+        for process in psutil.process_iter(("pid", "status")):
+            try:
+                if (
+                    process.info["status"] != psutil.STATUS_ZOMBIE
+                    and os.getpgid(process.pid) == pid
+                ):
+                    return True
+            except ProcessLookupError:
+                pass
+        return False

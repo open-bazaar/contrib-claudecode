@@ -1,0 +1,12 @@
+name: Exact prefix acceptance
+description: Restore the actual model prefix before running acceptance inference
+inputs:
+  scenario:
+    description: Acceptance scenario
+    required: true
+  model:
+    description: Model ID returned by setup-ai-gateway
+    required: true
+runs:
+  using: node24
+  main: index.mjs
