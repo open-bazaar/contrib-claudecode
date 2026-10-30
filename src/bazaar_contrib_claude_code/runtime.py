@@ -81,6 +81,9 @@ class ClaudeCodeHarness:
         audit: Audit,
         model: str | None = None,
         effort: str | None = None,
+        api_key: str | None = None,
+        bedrock_api_key: str | None = None,
+        bedrock_region: str | None = None,
     ) -> None:
         self._input = input
         self._timer = timer
@@ -89,6 +92,9 @@ class ClaudeCodeHarness:
         self._sessions: dict[str, SessionInput] = {}
         self._model = model
         self._effort = effort
+        self._api_key = api_key
+        self._bedrock_api_key = bedrock_api_key
+        self._bedrock_region = bedrock_region
         self._connections: dict[str, _Connection] = {}
         self._lifecycle_events: asyncio.Queue[HarnessExpire] = asyncio.Queue()
         self._retirement_tasks: set[asyncio.Task[None]] = set()
@@ -388,6 +394,13 @@ class ClaudeCodeHarness:
         if os.name != "nt":
             await asyncio.to_thread(workspace.chmod, 0o700)
         process_environment = environment() | session.environment
+        if self._api_key is not None:
+            process_environment["ANTHROPIC_API_KEY"] = self._api_key
+        if self._bedrock_api_key is not None:
+            process_environment["CLAUDE_CODE_USE_BEDROCK"] = "1"
+            process_environment["AWS_BEARER_TOKEN_BEDROCK"] = self._bedrock_api_key
+        if self._bedrock_region is not None:
+            process_environment["AWS_REGION"] = self._bedrock_region
         harness_version = await asyncio.to_thread(version, "bazaar-contrib-claude-code")
         process_environment["CLAUDE_AGENT_SDK_CLIENT_APP"] = (
             f"bazaar-contrib-claude-code/{harness_version}"
