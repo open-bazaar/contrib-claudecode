@@ -31,6 +31,7 @@ from bazaar_core import (
     ContribSpec,
     load,
 )
+from blockbuster import blockbuster_ctx
 
 from bazaar_contrib_claude_code import harness
 
@@ -43,13 +44,18 @@ events: list[AuditEvent] = []
 gate_requested = False
 gate_entered = asyncio.Event()
 gate_released = asyncio.Event()
+exercised = False
 
 
 async def record(ctx: Context, event: AuditEvent):
     global gate_requested
     events.append(event)
-    with (output / "audit.jsonl").open("a") as stream:
-        stream.write(event.model_dump_json() + "\n")
+
+    def append():
+        with (output / "audit.jsonl").open("a") as stream:
+            stream.write(event.model_dump_json() + "\n")
+
+    await asyncio.to_thread(append)
     if event.event_name == "harness.source.received":
         packet = json.loads(cast(dict[str, Any], event.payload)["data"])
         if gate_requested and packet["type"] == "result":
@@ -87,7 +93,7 @@ async def inputs(ctx: Context):
 
 @asynccontextmanager
 async def exercise(ctx: Context):
-    global gate_requested
+    global gate_requested, exercised
     provider = ctx.accept(HARNESS)
     publisher = ctx.accept(AUDIT)
     started = await provider.start_session(
@@ -183,8 +189,11 @@ async def exercise(ctx: Context):
         stream = await provider.start_turn(session, continued, Approvals(), timeout=30)
         await consume(stream, continued)
         cases.append(verify(continued, 1))
-        (output / "result.json").write_text(json.dumps({"cases": cases}) + "\n")
-        print(json.dumps({"cases": cases}), flush=True)
+        await asyncio.to_thread(
+            (output / "result.json").write_text, json.dumps({"cases": cases}) + "\n"
+        )
+        await asyncio.to_thread(print, json.dumps({"cases": cases}), flush=True)
+        exercised = True
         yield
     finally:
         gate_released.set()
@@ -192,7 +201,7 @@ async def exercise(ctx: Context):
 
 
 async def main():
-    timer = load((ContribSpec(contrib="timer-wheel"),))
+    timer = await asyncio.to_thread(load, (ContribSpec(contrib="timer-wheel"),))
     async with (
         ContribHub() as hub,
         hub.enable(
@@ -225,6 +234,8 @@ async def main():
         ),
     ):
         pass
+    assert exercised
 
 
-asyncio.run(main())
+with blockbuster_ctx():
+    asyncio.run(main())

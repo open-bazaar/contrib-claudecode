@@ -254,8 +254,18 @@ class ProcessSupervisor:
             terminate_deadline = now + timeout * 0.9
             kill_deadline = now + timeout
             tree = ()
-            try:
+
+            def snapshot() -> None:
+                nonlocal tree
                 tree = self.children.snapshot(process.pid)
+
+            try:
+                capture = asyncio.create_task(asyncio.to_thread(snapshot))
+                try:
+                    await asyncio.shield(capture)
+                except asyncio.CancelledError:
+                    await capture
+                    raise
                 if process.stdin is not None:
                     process.stdin.close()
                 for deadline, operation in (
@@ -264,7 +274,7 @@ class ProcessSupervisor:
                     (kill_deadline, "kill"),
                 ):
                     if operation == "kill":
-                        self.children.ended(process.pid, tree)
+                        await self.children.ended(process.pid, tree)
                     elif operation is not None and process.returncode is None:
                         try:
                             process.terminate()
@@ -277,7 +287,7 @@ class ProcessSupervisor:
                     break
                 else:
                     raise TimeoutError
-                self.children.ended(process.pid, tree)
+                await self.children.ended(process.pid, tree)
                 remaining = kill_deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
                     raise TimeoutError
@@ -300,7 +310,7 @@ class ProcessSupervisor:
                         process.kill()
                     except ProcessLookupError:
                         pass
-                self.children.ended(process.pid, tree)
+                await self.children.ended(process.pid, tree)
             self._state = ProcessState.STOPPED
             self._exit_event.set()
 
@@ -353,7 +363,7 @@ class ProcessSupervisor:
             _LOGGER.warning("process %s outlived its kill; still waiting", process.pid)
             returncode = await process.wait()
         self._returncode = returncode
-        self.children.ended(process.pid)
+        await self.children.ended(process.pid)
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         if self.source is not None:
@@ -400,7 +410,7 @@ class ProcessSupervisor:
 
     async def _watch_process(self, process: asyncio.subprocess.Process) -> None:
         self._returncode = await process.wait()
-        self.children.ended(process.pid)
+        await self.children.ended(process.pid)
         readers = tuple(
             task for task in (self._stdout_task, self._stderr_task) if task is not None
         )

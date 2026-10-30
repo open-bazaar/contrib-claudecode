@@ -62,8 +62,15 @@ async def test_installed_application(
 
     async def execute(label: str, *arguments: str):
         started = asyncio.get_running_loop().time()
-        print("Run", label, *arguments, flush=True)
+        await asyncio.to_thread(print, "Run", label, *arguments, flush=True)
         output = await asyncio.to_thread((tmp_path / (label + ".log")).open, "wb")
+
+        def record(chunk: bytes):
+            output.write(chunk)
+            output.flush()
+            sys.stdout.buffer.write(chunk)
+            sys.stdout.buffer.flush()
+
         try:
             process = await asyncio.create_subprocess_exec(
                 *arguments,
@@ -74,18 +81,16 @@ async def test_installed_application(
             )
             assert process.stdout is not None
             while chunk := await process.stdout.read(8192):
-                output.write(chunk)
-                output.flush()
-                sys.stdout.buffer.write(chunk)
-                sys.stdout.buffer.flush()
+                await asyncio.to_thread(record, chunk)
             await process.wait()
-            print(
+            await asyncio.to_thread(
+                print,
                 f"Finished {label}: exit={process.returncode}, "
                 f"elapsed={asyncio.get_running_loop().time() - started:.2f}s",
                 flush=True,
             )
         finally:
-            output.close()
+            await asyncio.to_thread(output.close)
         assert process.returncode == 0, await asyncio.to_thread(
             (tmp_path / (label + ".log")).read_text
         )

@@ -7,6 +7,7 @@ import sys
 import threading
 
 from bazaar_compute_node.cli import dispatch
+from blockbuster import blockbuster_ctx
 
 
 async def serve():
@@ -24,7 +25,7 @@ async def serve():
         sys.stdin.readline()
         loop.call_soon_threadsafe(task.cancel)
 
-    threading.Thread(target=stop, daemon=True).start()
+    await asyncio.to_thread(threading.Thread(target=stop, daemon=True).start)
     try:
         await task
     except asyncio.CancelledError:
@@ -32,4 +33,5 @@ async def serve():
 
 
 if __name__ == "__main__":
-    asyncio.run(serve())
+    with blockbuster_ctx():
+        asyncio.run(serve())

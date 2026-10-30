@@ -63,7 +63,7 @@ class Children:
             return ()
         return (process, *descendants)
 
-    def ended(self, pid: int, tree: Sequence[psutil.Process] = ()) -> None:
+    async def ended(self, pid: int, tree: Sequence[psutil.Process] = ()) -> None:
         """A runtime is gone: what it started and left running goes with it, so
         nothing it began outlives it unregistered."""
 
@@ -72,12 +72,8 @@ class Children:
                 job.close()
                 del self._jobs[pid]
         else:
-            _signal_group(pid, signal.SIGKILL)
-        for process in reversed(tree):
-            try:
-                process.kill()
-            except psutil.NoSuchProcess:
-                pass
+            await asyncio.to_thread(_signal_group, pid, signal.SIGKILL)
+        await asyncio.to_thread(_kill_tree, tree)
         self._running.discard(pid)
 
     async def wait(self, tree: Sequence[psutil.Process]) -> None:
@@ -101,13 +97,22 @@ class Children:
             await asyncio.gather(*tuple(self._reapers), return_exceptions=True)
             return
         trees: dict[int, tuple[psutil.Process, ...]] = {}
-        try:
+
+        def snapshot() -> None:
             for pid in pids:
                 trees[pid] = self.snapshot(pid)
+
+        try:
+            capture = asyncio.create_task(asyncio.to_thread(snapshot))
+            try:
+                await asyncio.shield(capture)
+            except asyncio.CancelledError:
+                await capture
+                raise
             if sys.platform == "win32":
                 return
             for pid in pids:
-                _signal_group(pid, signal.SIGTERM)
+                await asyncio.to_thread(_signal_group, pid, signal.SIGTERM)
             loop = asyncio.get_running_loop()
             deadline = loop.time() + END_GRACE_SECONDS
             roots = [tree[0] for tree in trees.values() if tree]
@@ -116,7 +121,9 @@ class Children:
                 _, remaining = await asyncio.to_thread(
                     psutil.wait_procs, remaining, timeout=0
                 )
-                if not remaining and not any(root.is_running() for root in roots):
+                if not remaining and not await asyncio.to_thread(
+                    lambda: any(root.is_running() for root in roots)
+                ):
                     break
                 if self.timer is None:
                     await asyncio.sleep(0.05)
@@ -124,8 +131,16 @@ class Children:
                     await self.timer.create(50).wait()
         finally:
             for pid in pids:
-                self.ended(pid, trees.get(pid, ()))
+                await self.ended(pid, trees.get(pid, ()))
             await asyncio.gather(*tuple(self._reapers), return_exceptions=True)
+
+
+def _kill_tree(tree: Sequence[psutil.Process]) -> None:
+    for process in reversed(tree):
+        try:
+            process.kill()
+        except psutil.NoSuchProcess:
+            pass
 
 
 if sys.platform != "win32":

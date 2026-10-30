@@ -31,6 +31,7 @@ from bazaar_core import (
     ContribSpec,
     load,
 )
+from blockbuster import blockbuster_ctx
 
 from bazaar_contrib_claude_code import harness
 
@@ -60,8 +61,12 @@ async def record(ctx: Context, event: AuditEvent):
             close_cancelled = True
             raise
     events.append(event)
-    with (output / "audit.jsonl").open("a") as stream:
-        stream.write(event.model_dump_json() + "\n")
+
+    def append():
+        with (output / "audit.jsonl").open("a") as stream:
+            stream.write(event.model_dump_json() + "\n")
+
+    await asyncio.to_thread(append)
 
 
 @asynccontextmanager
@@ -101,13 +106,15 @@ async def exercise(ctx: Context):
     )
     assert result.value is not None, result
     session = result.value
-    processes = [
-        process
-        for process in psutil.Process().children(recursive=True)
-        if f"--session-id={session.provider_thread_id}" in process.cmdline()
-    ]
+    processes = await asyncio.to_thread(
+        lambda: [
+            process
+            for process in psutil.Process().children(recursive=True)
+            if f"--session-id={session.provider_thread_id}" in process.cmdline()
+        ]
+    )
     assert len(processes) == 1, [process.pid for process in processes]
-    processes[0].terminate()
+    await asyncio.to_thread(processes[0].terminate)
     try:
         # The real watcher is publishing its close when the owner stops it.
         await close_entered.wait()
@@ -128,7 +135,7 @@ async def exercise(ctx: Context):
 
 
 async def main():
-    timer = load((ContribSpec(contrib="timer-wheel"),))
+    timer = await asyncio.to_thread(load, (ContribSpec(contrib="timer-wheel"),))
     async with (
         ContribHub() as hub,
         hub.enable(
@@ -173,11 +180,13 @@ async def main():
             for event in events
             if event.event_name == "harness.source.closed"
         ]
-        live = [
-            process.pid
-            for process in psutil.Process().children(recursive=True)
-            if process.is_running() and process.status() != psutil.STATUS_ZOMBIE
-        ]
+        live = await asyncio.to_thread(
+            lambda: [
+                process.pid
+                for process in psutil.Process().children(recursive=True)
+                if process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+            ]
+        )
         report = {
             "source_messages": len(messages),
             "closed": closed,
@@ -185,8 +194,10 @@ async def main():
             "cancelled_stop": cancelled_stop,
             "live_owned_children": live,
         }
-        (output / "result.json").write_text(json.dumps(report) + "\n")
-        print(json.dumps(report), flush=True)
+        await asyncio.to_thread(
+            (output / "result.json").write_text, json.dumps(report) + "\n"
+        )
+        await asyncio.to_thread(print, json.dumps(report), flush=True)
         assert messages and len(closed) == 3 and not close_cancelled, report
         assert cancelled_stop, report
         assert {message.source_id for message in messages} == {
@@ -201,4 +212,5 @@ async def main():
         assert not live, report
 
 
-asyncio.run(main())
+with blockbuster_ctx():
+    asyncio.run(main())

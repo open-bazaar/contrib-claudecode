@@ -26,17 +26,20 @@ async def test_cancelled_stop_cleans_detached_descendant(tmp_path: Path):
     descendants: list[psutil.Process] = []
     survived: list[int] = []
     cancelled = False
+    exercised = False
 
     async def record(ctx: Context, event: AuditEvent):
         events.append(event)
         if event.event_name == "harness.source.received":
             payload = cast(dict[str, Any], event.payload)
-            descendants.append(psutil.Process(int(payload["data"].strip())))
+            descendants.append(
+                await asyncio.to_thread(psutil.Process, int(payload["data"].strip()))
+            )
             ready.set()
 
     @asynccontextmanager
     async def exercise(ctx: Context):
-        nonlocal cancelled
+        nonlocal cancelled, exercised
         children = Children()
         script = (
             "import os,subprocess,sys;"
@@ -71,11 +74,16 @@ async def test_cancelled_stop_cleans_detached_descendant(tmp_path: Path):
                 cancelled = True
             await children.end_all()
             survived.extend(
-                descendant.pid
-                for descendant in descendants
-                if descendant.is_running()
-                and descendant.status() != psutil.STATUS_ZOMBIE
+                await asyncio.to_thread(
+                    lambda: [
+                        descendant.pid
+                        for descendant in descendants
+                        if descendant.is_running()
+                        and descendant.status() != psutil.STATUS_ZOMBIE
+                    ]
+                )
             )
+            exercised = True
             yield
         finally:
             if supervisor.is_running:
@@ -83,7 +91,7 @@ async def test_cancelled_stop_cleans_detached_descendant(tmp_path: Path):
             await children.end_all()
             for descendant in descendants:
                 try:
-                    descendant.kill()
+                    await asyncio.to_thread(descendant.kill)
                 except psutil.NoSuchProcess:
                     pass
             await asyncio.to_thread(psutil.wait_procs, descendants)
@@ -113,7 +121,7 @@ async def test_cancelled_stop_cleans_detached_descendant(tmp_path: Path):
         ),
     ):
         pass
-    assert cancelled and len(descendants) == 1
+    assert exercised and cancelled and len(descendants) == 1
     assert not survived
     closed = [
         cast(dict[str, Any], event.payload)
@@ -134,6 +142,7 @@ async def test_windows_job_cleans_inherited_pipes(
     events: list[AuditEvent] = []
     descendants: list[psutil.Process] = []
     root_ready = False
+    exercised = False
 
     async def record(ctx: Context, event: AuditEvent):
         nonlocal root_ready
@@ -144,7 +153,11 @@ async def test_windows_job_cleans_inherited_pipes(
             payload = cast(dict[str, Any], event.payload)
             data = payload["data"].strip()
             if data.startswith("leaf:"):
-                descendants.append(psutil.Process(int(data.removeprefix("leaf:"))))
+                descendants.append(
+                    await asyncio.to_thread(
+                        psutil.Process, int(data.removeprefix("leaf:"))
+                    )
+                )
             elif data == "root-ready":
                 root_ready = True
             if descendants and root_ready:
@@ -152,6 +165,7 @@ async def test_windows_job_cleans_inherited_pipes(
 
     @asynccontextmanager
     async def exercise(ctx: Context):
+        nonlocal exercised
         children = Children()
         leaf = (
             "import os,sys,threading;"
@@ -206,7 +220,9 @@ async def test_windows_job_cleans_inherited_pipes(
             await children.end_all()
             await closed.wait()
             assert len(descendants) == 1
-            assert not descendants[0].is_running()
+            await asyncio.to_thread(psutil.wait_procs, descendants)
+            assert not await asyncio.to_thread(descendants[0].is_running)
+            exercised = True
             yield
         finally:
             if supervisor.is_running:
@@ -214,7 +230,7 @@ async def test_windows_job_cleans_inherited_pipes(
             await children.end_all()
             for descendant_process in descendants:
                 try:
-                    descendant_process.kill()
+                    await asyncio.to_thread(descendant_process.kill)
                 except psutil.NoSuchProcess:
                     pass
             await asyncio.to_thread(psutil.wait_procs, descendants)
@@ -244,6 +260,7 @@ async def test_windows_job_cleans_inherited_pipes(
         ),
     ):
         pass
+    assert exercised
     closures = [
         event for event in events if event.event_name == "harness.source.closed"
     ]

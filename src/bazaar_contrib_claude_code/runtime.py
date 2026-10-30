@@ -388,8 +388,9 @@ class ClaudeCodeHarness:
         if os.name != "nt":
             await asyncio.to_thread(workspace.chmod, 0o700)
         process_environment = environment() | session.environment
+        harness_version = await asyncio.to_thread(version, "bazaar-contrib-claude-code")
         process_environment["CLAUDE_AGENT_SDK_CLIENT_APP"] = (
-            f"bazaar-contrib-claude-code/{version('bazaar-contrib-claude-code')}"
+            f"bazaar-contrib-claude-code/{harness_version}"
         )
         deadline = asyncio.get_running_loop().time() + min(
             timeout, self._input.startup_timeout
