@@ -49,6 +49,8 @@ environment.update(
     CLAUDE_CONFIG_DIR=str(agent_root / "claude-config"),
     PATH=str(python.parent) + os.pathsep + os.environ["PATH"],
 )
+if scenario == "mcp-once":
+    environment["ANTHROPIC_API_KEY"] = "inherited-key-overridden-by-config"
 (root / "environment.private.json").write_text(
     json.dumps(
         {
@@ -78,6 +80,8 @@ agents = [
         "harness": [{"kind": "claudecode", "model": model}],
     }
 ]
+if scenario == "mcp-once":
+    agents[0]["harness"][0]["api_key"] = environment["AI_API_KEY"]
 # Linux's native Claude sandbox cannot expose a preview port to the host.
 if scenario in {"full-access", "background"}:
     agents[0]["session"] = {"config": {"sandbox": {"policy": "danger-full-access"}}}

@@ -27,6 +27,7 @@ class Config(BaseModel):
     model_config = ConfigDict(frozen=True)
     model: str | None = None
     effort: str | None = None
+    api_key: str | None = None
 
 
 @asynccontextmanager
@@ -37,6 +38,7 @@ async def lifespan(ctx: Context, config: Config):
         ctx.accept(AUDIT),
         config.model,
         config.effort,
+        config.api_key,
     )
     ctx.offer(HARNESS, instance)
     try:
