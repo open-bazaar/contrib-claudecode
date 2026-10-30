@@ -24,3 +24,4 @@ Optional fields in the agent's `claudecode` Harness configuration:
 
 - `model`: Claude Code model; defaults to the Claude Code configuration.
 - `effort`: Reasoning effort; defaults to the Claude Code configuration.
+- `api_key`: API key injected as `ANTHROPIC_API_KEY`, overriding the inherited value.
