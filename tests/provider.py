@@ -7,6 +7,9 @@ from pathlib import Path
 from typing import Any
 
 import psutil
+from bazaar_core import ContribEntry
+
+from bazaar_contrib_claude_code import harness
 
 KIND = "claudecode"
 PACKAGE = "bazaar-contrib-claude-code"
@@ -26,6 +29,9 @@ BACKGROUND = (
     "with the Bash tool's `run_in_background` option, without a trailing `&`. "
     "Keep that background task running after this turn."
 )
+STEERING_INPUT = "/cost"
+HARNESS_ENTRY = ContribEntry(name="harness", definition=harness)
+EXIT_CLOSES_SOURCE = True
 
 
 def configure(
@@ -67,9 +73,7 @@ def configure(
 
 
 def applications(scenario: str) -> tuple[str, ...]:
-    if scenario == "bcc":
-        return ("lifecycle_application.py", "steering_application.py")
-    return ("lifecycle_application.py",)
+    return ("boundary_application.py",) if scenario == "bcc" else ()
 
 
 def bcc_command(call: dict[str, Any]) -> str | None:
@@ -88,12 +92,41 @@ def approval_call_id(approval: dict[str, Any]) -> str:
 def session_processes(
     parent: psutil.Process, environment: dict[str, str]
 ) -> list[psutil.Process]:
-    return [
-        child
-        for child in parent.children()
-        if any(
-            value.startswith(("--session-id=", "--resume="))
-            for value in child.cmdline()
-        )
-        and child.environ().get(HOME) == environment[HOME]
-    ]
+    processes = []
+    for child in parent.children():
+        try:
+            if (
+                any(
+                    value.startswith(("--session-id=", "--resume="))
+                    for value in child.cmdline()
+                )
+                and child.environ().get(HOME) == environment[HOME]
+            ):
+                processes.append(child)
+        except psutil.NoSuchProcess:
+            continue
+    return processes
+
+
+def steering_input(direction: str, packet: dict[str, Any]) -> str | None:
+    return packet["uuid"] if direction == "sent" and packet["type"] == "user" else None
+
+
+def steering_settled(direction: str, packet: dict[str, Any]) -> str | None:
+    if packet["type"] == "command_lifecycle" and packet["state"] in {
+        "completed",
+        "cancelled",
+        "discarded",
+        "refused",
+    }:
+        return packet["command_uuid"]
+    return None
+
+
+def steering_result(direction: str, packet: dict[str, Any]) -> dict[str, Any] | None:
+    if packet["type"] != "result":
+        return None
+    return {
+        key: packet.get(key)
+        for key in ("user_message_uuids", "queued_turn_count", "result_index")
+    }

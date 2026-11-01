@@ -118,6 +118,8 @@ jobs:
             .artifacts/e2e/**/lifecycle/result.json
             .artifacts/e2e/**/steering.log
             .artifacts/e2e/**/steering/result.json
+            .artifacts/e2e/**/boundary.log
+            .artifacts/e2e/**/boundary/result.json
             .artifacts/e2e/**/*-prepare.log
             .artifacts/e2e/**/bootstrap.log
             .artifacts/e2e/**/activation.log

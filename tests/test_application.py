@@ -142,7 +142,12 @@ async def test_installed_application(
         str(shared_agent_root),
         scenario,
     )
-    for application in provider.applications(scenario):
+    applications = (
+        "lifecycle_application.py",
+        *(("steering_application.py",) if scenario == "bcc" else ()),
+        *provider.applications(scenario),
+    )
+    for application in applications:
         await execute(
             application.removesuffix("_application.py"),
             str(python),

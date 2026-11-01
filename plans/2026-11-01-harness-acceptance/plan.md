@@ -76,7 +76,7 @@ harness builder 种类，其余部分已经分叉：
 
 - [x] 共用文件与 provider.py：六个共有场景两仓逐字相同，合并 Claude Code 已有的线程化与断言信息，
   mcp-session、mcp-always 迁入共用驱动；最低节点版本统一为 0.3.0rc12，去掉重复的 psutil 安装参数。
-- [ ] 补齐共有测试：Codex 增加 lifecycle 与 steering 通用部分；Claude Code 的 steering 拆为通用部分与
+- [x] 补齐共有测试：Codex 增加 lifecycle 与 steering 通用部分；Claude Code 的 steering 拆为通用部分与
   boundary_application.py。
 - [ ] 进程清理矩阵对齐，修复暴露的实现缺口。
 

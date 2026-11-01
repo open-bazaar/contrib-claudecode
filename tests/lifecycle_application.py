@@ -33,9 +33,8 @@ from bazaar_core import (
     load,
 )
 from blockbuster import blockbuster_ctx
+from provider import EXIT_CLOSES_SOURCE, HARNESS_ENTRY, session_processes
 from pydantic import JsonValue
-
-from bazaar_contrib_claude_code import harness
 
 root = Path(sys.argv[1]).resolve()
 workspace = Path(sys.argv[2]).resolve()
@@ -102,25 +101,34 @@ async def exercise(ctx: Context):
         payload={"budget": 0},
     )
 
+    parent = await asyncio.to_thread(psutil.Process)
+    environment = dict(os.environ)
+    existing = {
+        process.pid
+        for process in await asyncio.to_thread(session_processes, parent, environment)
+    }
     race_session_id = str(uuid7())
     result = await provider.start_session(
         SessionInput(id=race_session_id, workspace=workspace), timeout=30
     )
     assert result.value is not None, result
     session = result.value
-    processes = await asyncio.to_thread(
-        lambda: [
-            process
-            for process in psutil.Process().children(recursive=True)
-            if f"--session-id={session.provider_thread_id}" in process.cmdline()
-        ]
-    )
+    processes = [
+        process
+        for process in await asyncio.to_thread(session_processes, parent, environment)
+        if process.pid not in existing
+    ]
     assert len(processes) == 1, [process.pid for process in processes]
     await asyncio.to_thread(processes[0].terminate)
     try:
-        # The real watcher is publishing its close when the owner stops it.
-        await close_entered.wait()
-        await provider.stop_session(session, timeout=0)
+        if EXIT_CLOSES_SOURCE:
+            # The real watcher is publishing its close when the owner stops it.
+            await close_entered.wait()
+            await provider.stop_session(session, timeout=0)
+        else:
+            # The zero-budget stop returns while its own close is publishing.
+            await provider.stop_session(session, timeout=0)
+            await close_entered.wait()
     finally:
         close_released.set()
 
@@ -160,7 +168,7 @@ async def main():
                         name="inputs",
                         definition=Contrib(offers=[HARNESS_INPUT], lifespan=inputs),
                     ),
-                    ContribEntry(name="claude", definition=harness),
+                    HARNESS_ENTRY,
                     ContribEntry(
                         name="exercise",
                         definition=Contrib(
