@@ -106,7 +106,7 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "bazaar-compute-node" },
-    { name = "bcn-claude-test-channel" },
+    { name = "bcn-test-channel" },
     { name = "blockbuster" },
     { name = "psutil" },
     { name = "pyright" },
@@ -130,7 +130,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "bazaar-compute-node", specifier = ">=0.3.0rc12,<0.4" },
-    { name = "bcn-claude-test-channel", editable = "tests/fixtures/channel" },
+    { name = "bcn-test-channel", editable = "tests/fixtures/channel" },
     { name = "blockbuster", specifier = ">=1.5.29,<1.6" },
     { name = "psutil", specifier = ">=7.0.0" },
     { name = "pyright", specifier = "==1.1.414" },
@@ -249,7 +249,7 @@ wheels = [
 ]
 
 [[package]]
-name = "bcn-claude-test-channel"
+name = "bcn-test-channel"
 version = "0.0.0"
 source = { editable = "tests/fixtures/channel" }
 dependencies = [
@@ -268,11 +268,11 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "aiofiles", specifier = ">=24.1.0" },
-    { name = "bazaar-contrib-audit", specifier = ">=0.3.0rc10,<0.4" },
+    { name = "bazaar-contrib-audit", specifier = ">=0.3.0rc12,<0.4" },
     { name = "bazaar-contrib-channel", specifier = ">=0.3.0rc12,<0.4" },
-    { name = "bazaar-contrib-harness", specifier = ">=0.3.0rc10,<0.4" },
-    { name = "bazaar-contrib-timer", specifier = "~=0.3.0rc10" },
-    { name = "bazaar-core", specifier = ">=0.3.0rc10,<0.4" },
+    { name = "bazaar-contrib-harness", specifier = ">=0.3.0rc12,<0.4" },
+    { name = "bazaar-contrib-timer", specifier = ">=0.3.0rc12,<0.4" },
+    { name = "bazaar-core", specifier = ">=0.3.0rc12,<0.4" },
     { name = "blockbuster", specifier = ">=1.5.29,<1.6" },
     { name = "mcp", specifier = ">=2.3.0" },
     { name = "psutil", specifier = ">=7.0.0" },

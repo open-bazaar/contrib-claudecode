@@ -1,14 +1,14 @@
 [project]
-name = "bcn-claude-test-channel"
+name = "bcn-test-channel"
 version = "0.0.0"
 requires-python = ">=3.15"
 dependencies = [
     "aiofiles>=24.1.0",
-    "bazaar-core>=0.3.0rc10,<0.4",
-    "bazaar-contrib-audit>=0.3.0rc10,<0.4",
+    "bazaar-core>=0.3.0rc12,<0.4",
+    "bazaar-contrib-audit>=0.3.0rc12,<0.4",
     "bazaar-contrib-channel>=0.3.0rc12,<0.4",
-    "bazaar-contrib-harness>=0.3.0rc10,<0.4",
-    "bazaar-contrib-timer~=0.3.0rc10",
+    "bazaar-contrib-harness>=0.3.0rc12,<0.4",
+    "bazaar-contrib-timer>=0.3.0rc12,<0.4",
     "blockbuster>=1.5.29,<1.6",
     "mcp>=2.3.0",
     "pydantic>=2.12.0",
@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.entry-points."bazaar_compute_node.contribs"]
-test-channel-builder = "bcn_claude_test_channel:channel_builder"
+test-channel-builder = "bcn_test_channel:channel_builder"
 
 [build-system]
 requires = ["uv_build>=0.13.0,<0.14.0"]

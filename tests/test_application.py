@@ -7,21 +7,12 @@ import os
 import sys
 from pathlib import Path
 
+import provider
 import pytest
 
 
 @pytest.mark.e2e
-@pytest.mark.parametrize(
-    "scenario",
-    [
-        "mcp-once",
-        "bcc",
-        "full-access",
-        "recovery",
-        "refresh",
-        "background",
-    ],
-)
+@pytest.mark.parametrize("scenario", provider.SCENARIOS)
 async def test_installed_application(
     tmp_path: Path,
     pytestconfig: pytest.Config,
@@ -126,7 +117,7 @@ async def test_installed_application(
         "--refresh",
         "--default-index",
         "https://pypi.org/simple",
-        "bazaar-compute-node>=0.3.0rc10,<0.4",
+        "bazaar-compute-node>=0.3.0rc12,<0.4",
     ]
     for wheel in wheels:
         arguments.extend(["--with", str(wheel)])
@@ -151,18 +142,11 @@ async def test_installed_application(
         str(shared_agent_root),
         scenario,
     )
-    await execute(
-        "lifecycle",
-        str(python),
-        str(source / "tests/lifecycle_application.py"),
-        str(root),
-        str(shared_agent_root / "workspace"),
-    )
-    if scenario == "bcc":
+    for application in provider.applications(scenario):
         await execute(
-            "steering",
+            application.removesuffix("_application.py"),
             str(python),
-            str(source / "tests/steering_application.py"),
+            str(source / "tests" / application),
             str(root),
             str(shared_agent_root / "workspace"),
         )

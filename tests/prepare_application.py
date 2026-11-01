@@ -12,6 +12,7 @@ from importlib.metadata import version
 from pathlib import Path
 from uuid import uuid4
 
+import provider
 import tomli_w
 
 root = Path(sys.argv[1]).resolve()
@@ -42,76 +43,50 @@ endpoint = (
     if os.name == "nt"
     else "/tmp/bccj-" + str(uuid4()) + ".sock"
 )
-environment.update(
-    ANTHROPIC_BASE_URL=environment["AI_GATEWAY_BASE_URL"],
-    ANTHROPIC_API_KEY=environment["AI_API_KEY"],
-    BCN_HOME=str(root / "home"),
-    CLAUDE_CONFIG_DIR=str(agent_root / "claude-config"),
-    PATH=str(python.parent) + os.pathsep + os.environ["PATH"],
-)
-if scenario == "mcp-once":
-    environment["ANTHROPIC_API_KEY"] = "inherited-key-overridden-by-config"
-(root / "environment.private.json").write_text(
-    json.dumps(
-        {
-            name: environment[name]
-            for name in (
-                "BCN_HOME",
-                "CLAUDE_CONFIG_DIR",
-                "PATH",
-                "ANTHROPIC_BASE_URL",
-                "ANTHROPIC_API_KEY",
-            )
-        }
-    )
-)
-(root / "environment.private.json").chmod(0o600)
-home = Path(environment["CLAUDE_CONFIG_DIR"])
+home = agent_root / provider.HOME_DIRECTORY
 home.mkdir(parents=True, exist_ok=True)
 workspace = agent_root / "workspace"
 workspace.mkdir(parents=True, exist_ok=True)
+environment.update(
+    BCN_HOME=str(root / "home"),
+    PATH=str(python.parent) + os.pathsep + os.environ["PATH"],
+)
+environment[provider.HOME] = str(home)
+provider.configure(environment, home, workspace, python, model, scenario)
 agents = [
     {
         "id": "assistant",
         "name": "Assistant",
         "workspace": str(workspace),
         "mode": "session",
-        "channel": [{"kind": "test-channel", "audit_file": str(root / "audit.jsonl")}],
-        "harness": [{"kind": "claudecode", "model": model}],
+        "channel": [
+            {
+                "kind": "test-channel",
+                "audit_file": str(root / "audit.jsonl"),
+                "harness": provider.KIND,
+            }
+        ],
+        "harness": [{"kind": provider.KIND, "model": model}],
     }
 ]
 if scenario == "mcp-once":
+    environment[provider.API_KEY] = "inherited-key-overridden-by-config"
     agents[0]["harness"][0]["api_key"] = environment["AI_API_KEY"]
-# Linux's native Claude sandbox cannot expose a preview port to the host.
-if scenario in {"full-access", "background"}:
+if scenario in provider.FULL_ACCESS:
     agents[0]["session"] = {"config": {"sandbox": {"policy": "danger-full-access"}}}
 if scenario == "refresh":
-    for name in ("AGENTS.md", "CLAUDE.md"):
+    for name in provider.INSTRUCTION_FILES:
         (workspace / name).write_text("Keep replies clear.\n")
-(home / "settings.json").write_text(
+(root / "environment.private.json").write_text(
     json.dumps(
         {
-            "enableAllProjectMcpServers": True,
-            "env": {
-                "ENABLE_TOOL_SEARCH": "false",
-                "MCP_CONNECTION_NONBLOCKING": "0",
-            },
-            "permissions": {"ask": ["Bash(bcc *)"]},
+            name: environment[name]
+            for name in ("BCN_HOME", provider.HOME, "PATH", *provider.PRIVATE)
+            if name in environment
         }
     )
 )
-(workspace / ".mcp.json").write_text(
-    json.dumps(
-        {
-            "mcpServers": {
-                "test": {
-                    "command": str(python),
-                    "args": ["-m", "bcn_claude_test_channel.mcp"],
-                }
-            },
-        }
-    )
-)
+(root / "environment.private.json").chmod(0o600)
 config = root / "node.toml"
 command = [str(python), "-m", "bazaar_compute_node"]
 print("Bootstrap installed application", config, flush=True)
@@ -136,12 +111,11 @@ for package in document["contribs"]:
 document["contribs"] = [
     package
     for package in document["contribs"]
-    if package["package"]
-    not in {"bcn-claude-test-channel", "bazaar-contrib-claude-code"}
+    if package["package"] not in {"bcn-test-channel", provider.PACKAGE}
 ]
 for package, entry in (
-    ("bcn-claude-test-channel", "test-channel-builder"),
-    ("bazaar-contrib-claude-code", "claudecode-builder"),
+    ("bcn-test-channel", "test-channel-builder"),
+    (provider.PACKAGE, provider.BUILDER),
 ):
     (wheel,) = distributions.glob(package.replace("-", "_") + "-*.whl")
     document["contribs"].append(
@@ -172,7 +146,7 @@ print(
             "bcn_version": version("bazaar-compute-node"),
             "agent_id": "assistant",
             "workspace": str(workspace),
-            "claude_config_dir": str(home),
+            "config_dir": str(home),
             "bcn_packages": {
                 package.metadata["Name"]: package.version
                 for package in installed_distributions()
