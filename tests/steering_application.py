@@ -6,12 +6,14 @@ import asyncio
 import json
 import os
 import sys
+from collections import defaultdict
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid7
 
-from bazaar_contrib_audit import AUDIT, AUDIT_EVENT, AuditContext, AuditEvent, audit
+from audit_hold import held_audit
+from bazaar_contrib_audit import AUDIT, AUDIT_EVENT, AuditContext, AuditEvent
 from bazaar_contrib_harness import (
     HARNESS,
     HARNESS_INPUT,
@@ -32,6 +34,7 @@ from bazaar_core import (
     load,
 )
 from blockbuster import blockbuster_ctx
+from pydantic import JsonValue
 
 from bazaar_contrib_claude_code import harness
 
@@ -41,14 +44,14 @@ output = root / "steering"
 output.mkdir()
 os.environ.update(json.loads((root / "environment.private.json").read_text()))
 events: list[AuditEvent] = []
-gate_requested = False
+recorded: defaultdict[str | None, asyncio.Event] = defaultdict(asyncio.Event)
+gate_turn: str | None = None
 gate_entered = asyncio.Event()
 gate_released = asyncio.Event()
 exercised = False
 
 
 async def record(ctx: Context, event: AuditEvent):
-    global gate_requested
     events.append(event)
 
     def append():
@@ -56,14 +59,26 @@ async def record(ctx: Context, event: AuditEvent):
             stream.write(event.model_dump_json() + "\n")
 
     await asyncio.to_thread(append)
-    if event.event_name == "harness.source.received":
-        packet = json.loads(cast(dict[str, Any], event.payload)["data"])
-        if gate_requested and packet["type"] == "result":
-            # Audit backpressure exposes a real result produced before the next
-            # stdin writes. No protocol frame or provider is manufactured.
-            gate_requested = False
-            gate_entered.set()
-            await gate_released.wait()
+    if event.event_name == "test.turn.output":
+        item = cast(dict[str, Any], event.payload)
+        if item["payload"]["type"] == "completed":
+            recorded[event.context.turn_id].set()
+
+
+async def hold(event_name: str, context: AuditContext, payload: JsonValue) -> None:
+    global gate_turn
+    if (
+        event_name == "harness.source.received"
+        and gate_turn is not None
+        and context.turn_id == gate_turn
+        and json.loads(cast(dict[str, Any], payload)["data"])["type"] == "result"
+    ):
+        # The harness awaits this publication before routing the line, so a
+        # real result produced before the next stdin writes stays unread here.
+        # No protocol frame or provider is manufactured.
+        gate_turn = None
+        gate_entered.set()
+        await gate_released.wait()
 
 
 class Approvals:
@@ -93,7 +108,7 @@ async def inputs(ctx: Context):
 
 @asynccontextmanager
 async def exercise(ctx: Context):
-    global gate_requested, exercised
+    global gate_turn, exercised
     provider = ctx.accept(HARNESS)
     publisher = ctx.accept(AUDIT)
     started = await provider.start_session(
@@ -118,7 +133,8 @@ async def exercise(ctx: Context):
             item.payload.type in {"failed", "unknown", "cancelled"} for item in items
         ), items
 
-    def verify(turn, expected):
+    async def verify(turn, expected):
+        await recorded[turn.id].wait()
         selected = [event for event in events if event.context.turn_id == turn.id]
         sent = []
         terminal = set()
@@ -163,13 +179,13 @@ async def exercise(ctx: Context):
         for _ in range(16):
             assert await provider.steer_turn(session, burst, "/cost", timeout=30)
         await consume(stream, burst)
-        cases.append(verify(burst, 17))
+        cases.append(await verify(burst, 17))
         assert not await provider.steer_turn(session, burst, "/cost", timeout=30)
 
         boundary = HarnessTurn(
             id=str(uuid7()), session_id=session.id, input_text="/cost"
         )
-        gate_requested = True
+        gate_turn = boundary.id
         stream = await provider.start_turn(session, boundary, Approvals(), timeout=30)
         consumer = asyncio.create_task(consume(stream, boundary))
         try:
@@ -179,7 +195,7 @@ async def exercise(ctx: Context):
         finally:
             gate_released.set()
         await consumer
-        cases.append(verify(boundary, 4))
+        cases.append(await verify(boundary, 4))
         assert cases[-1]["results"][0]["queued_turn_count"] == 0, cases
         assert len(cases[-1]["results"]) >= 2, cases
 
@@ -188,7 +204,7 @@ async def exercise(ctx: Context):
         )
         stream = await provider.start_turn(session, continued, Approvals(), timeout=30)
         await consume(stream, continued)
-        cases.append(verify(continued, 1))
+        cases.append(await verify(continued, 1))
         await asyncio.to_thread(
             (output / "result.json").write_text, json.dumps({"cases": cases}) + "\n"
         )
@@ -207,7 +223,7 @@ async def main():
         hub.enable(
             Composition(
                 entries=(
-                    ContribEntry(name="audit", definition=audit),
+                    ContribEntry(name="audit", definition=held_audit(hold)),
                     *timer.entries,
                     ContribEntry(
                         name="recorder",

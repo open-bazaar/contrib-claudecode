@@ -12,7 +12,8 @@ from typing import Any, cast
 from uuid import uuid7
 
 import psutil
-from bazaar_contrib_audit import AUDIT, AUDIT_EVENT, AuditContext, AuditEvent, audit
+from audit_hold import held_audit
+from bazaar_contrib_audit import AUDIT, AUDIT_EVENT, AuditContext, AuditEvent
 from bazaar_contrib_harness import (
     HARNESS,
     HARNESS_INPUT,
@@ -32,6 +33,7 @@ from bazaar_core import (
     load,
 )
 from blockbuster import blockbuster_ctx
+from pydantic import JsonValue
 
 from bazaar_contrib_claude_code import harness
 
@@ -49,17 +51,6 @@ cancelled_stop = False
 
 
 async def record(ctx: Context, event: AuditEvent):
-    global close_cancelled
-    if (
-        event.event_name == "harness.source.closed"
-        and event.context.session_id == race_session_id
-    ):
-        close_entered.set()
-        try:
-            await close_released.wait()
-        except asyncio.CancelledError:
-            close_cancelled = True
-            raise
     events.append(event)
 
     def append():
@@ -67,6 +58,17 @@ async def record(ctx: Context, event: AuditEvent):
             stream.write(event.model_dump_json() + "\n")
 
     await asyncio.to_thread(append)
+
+
+async def hold(event_name: str, context: AuditContext, payload: JsonValue) -> None:
+    global close_cancelled
+    if event_name == "harness.source.closed" and context.session_id == race_session_id:
+        close_entered.set()
+        try:
+            await close_released.wait()
+        except asyncio.CancelledError:
+            close_cancelled = True
+            raise
 
 
 @asynccontextmanager
@@ -141,7 +143,7 @@ async def main():
         hub.enable(
             Composition(
                 entries=(
-                    ContribEntry(name="audit", definition=audit),
+                    ContribEntry(name="audit", definition=held_audit(hold)),
                     *timer.entries,
                     ContribEntry(
                         name="recorder",
@@ -151,8 +153,7 @@ async def main():
                 diagnostics=timer.diagnostics,
             )
         ),
-    ):
-        async with hub.enable(
+        hub.enable(
             Composition(
                 entries=(
                     ContribEntry(
@@ -168,48 +169,50 @@ async def main():
                     ),
                 )
             )
-        ):
-            pass
-        messages = [
-            HarnessSourceEvent.model_validate(event.payload)
-            for event in events
-            if event.event_name in {"harness.source.sent", "harness.source.received"}
+        ),
+    ):
+        pass
+    # The recorder drains its queued audits while it stops.
+    messages = [
+        HarnessSourceEvent.model_validate(event.payload)
+        for event in events
+        if event.event_name in {"harness.source.sent", "harness.source.received"}
+    ]
+    closed = [
+        cast(dict[str, Any], event.payload)
+        for event in events
+        if event.event_name == "harness.source.closed"
+    ]
+    live = await asyncio.to_thread(
+        lambda: [
+            process.pid
+            for process in psutil.Process().children(recursive=True)
+            if process.is_running() and process.status() != psutil.STATUS_ZOMBIE
         ]
-        closed = [
-            cast(dict[str, Any], event.payload)
-            for event in events
-            if event.event_name == "harness.source.closed"
-        ]
-        live = await asyncio.to_thread(
-            lambda: [
-                process.pid
-                for process in psutil.Process().children(recursive=True)
-                if process.is_running() and process.status() != psutil.STATUS_ZOMBIE
-            ]
-        )
-        report = {
-            "source_messages": len(messages),
-            "closed": closed,
-            "close_audit_cancelled": close_cancelled,
-            "cancelled_stop": cancelled_stop,
-            "live_owned_children": live,
-        }
-        await asyncio.to_thread(
-            (output / "result.json").write_text, json.dumps(report) + "\n"
-        )
-        await asyncio.to_thread(print, json.dumps(report), flush=True)
-        assert messages and len(closed) == 3 and not close_cancelled, report
-        assert cancelled_stop, report
-        assert {message.source_id for message in messages} == {
-            source["source_id"] for source in closed
-        }, report
-        for source in closed:
-            assert [
-                message.sequence
-                for message in messages
-                if message.source_id == source["source_id"]
-            ] == list(range(1, source["sequence"] + 1)), report
-        assert not live, report
+    )
+    report = {
+        "source_messages": len(messages),
+        "closed": closed,
+        "close_audit_cancelled": close_cancelled,
+        "cancelled_stop": cancelled_stop,
+        "live_owned_children": live,
+    }
+    await asyncio.to_thread(
+        (output / "result.json").write_text, json.dumps(report) + "\n"
+    )
+    await asyncio.to_thread(print, json.dumps(report), flush=True)
+    assert messages and len(closed) == 3 and not close_cancelled, report
+    assert cancelled_stop, report
+    assert {message.source_id for message in messages} == {
+        source["source_id"] for source in closed
+    }, report
+    for source in closed:
+        assert [
+            message.sequence
+            for message in messages
+            if message.source_id == source["source_id"]
+        ] == list(range(1, source["sequence"] + 1)), report
+    assert not live, report
 
 
 with blockbuster_ctx():

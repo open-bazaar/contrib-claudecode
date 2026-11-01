@@ -21,6 +21,7 @@ from bazaar_contrib_channel import (
     CHANNEL,
     CHANNEL_BUILDERS,
     CHANNEL_INPUT,
+    CHANNEL_TURN,
     ChannelApprovalRequest,
     ChannelBuilderConfig,
     ChannelConnectionError,
@@ -34,6 +35,7 @@ from bazaar_contrib_channel import (
     ChannelSendRequest,
     ChannelTarget,
     ChannelTargetPresentation,
+    ChannelTurn,
     DmAddress,
     DmRequest,
     InboundAttachment,
@@ -41,7 +43,7 @@ from bazaar_contrib_channel import (
     SenderIdentity,
     channel_builder_key,
 )
-from bazaar_contrib_harness import ApprovalResult, HarnessOutput, harness_builder_key
+from bazaar_contrib_harness import ApprovalResult, harness_builder_key
 from bazaar_contrib_timer import TIMER, Timer
 from bazaar_contrib_timer import timeout as timer_timeout
 from bazaar_core import Context, Contrib, ServiceKey
@@ -250,14 +252,6 @@ class TestChannel:
         while True:
             yield await self.inbound.get()
 
-    def accept_turn_event(self, event: HarnessOutput, *, target: ChannelTarget):
-        self.outbound.put_nowait(
-            {
-                "event": event.model_dump(mode="json"),
-                "target": target.model_dump(mode="json"),
-            }
-        )
-
     async def prepare_send(
         self, request: ChannelSendRequest
     ) -> tuple[ChannelSendPart, ...]:
@@ -393,12 +387,21 @@ async def channel_lifespan(ctx: Context, config: ChannelConfig):
             )
 
 
+def turn(ctx: Context, value: ChannelTurn) -> None:
+    cast(TestChannel, ctx.accept(CHANNEL)).outbound.put_nowait(
+        {
+            "event": value.event.model_dump(mode="json"),
+            "target": value.target.model_dump(mode="json"),
+        }
+    )
+
+
 channel = Contrib(
     config=ChannelConfig,
     accepts=[CHANNEL_INPUT, TIMER, harness_builder_key("claudecode"), JOURNAL, AUDIT],
     offers=[CHANNEL],
     lifespan=channel_lifespan,
-    listen={AUDIT_EVENT: record},
+    listen={AUDIT_EVENT: record, CHANNEL_TURN: turn},
 )
 
 
