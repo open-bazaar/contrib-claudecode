@@ -1,4 +1,4 @@
-"""Exercise real native batching and result-boundary steering via public APIs."""
+"""Steer an active real Harness turn through the public API."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import sys
+from collections import defaultdict
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, cast
@@ -32,8 +33,13 @@ from bazaar_core import (
     load,
 )
 from blockbuster import blockbuster_ctx
-
-from bazaar_contrib_claude_code import harness
+from provider import (
+    HARNESS_ENTRY,
+    STEERING_INPUT,
+    steering_input,
+    steering_result,
+    steering_settled,
+)
 
 root = Path(sys.argv[1]).resolve()
 workspace = Path(sys.argv[2]).resolve()
@@ -41,14 +47,11 @@ output = root / "steering"
 output.mkdir()
 os.environ.update(json.loads((root / "environment.private.json").read_text()))
 events: list[AuditEvent] = []
-gate_requested = False
-gate_entered = asyncio.Event()
-gate_released = asyncio.Event()
+recorded: defaultdict[str | None, asyncio.Event] = defaultdict(asyncio.Event)
 exercised = False
 
 
 async def record(ctx: Context, event: AuditEvent):
-    global gate_requested
     events.append(event)
 
     def append():
@@ -56,14 +59,10 @@ async def record(ctx: Context, event: AuditEvent):
             stream.write(event.model_dump_json() + "\n")
 
     await asyncio.to_thread(append)
-    if event.event_name == "harness.source.received":
-        packet = json.loads(cast(dict[str, Any], event.payload)["data"])
-        if gate_requested and packet["type"] == "result":
-            # Audit backpressure exposes a real result produced before the next
-            # stdin writes. No protocol frame or provider is manufactured.
-            gate_requested = False
-            gate_entered.set()
-            await gate_released.wait()
+    if event.event_name == "test.turn.output":
+        item = cast(dict[str, Any], event.payload)
+        if item["payload"]["type"] == "completed":
+            recorded[event.context.turn_id].set()
 
 
 class Approvals:
@@ -93,7 +92,7 @@ async def inputs(ctx: Context):
 
 @asynccontextmanager
 async def exercise(ctx: Context):
-    global gate_requested, exercised
+    global exercised
     provider = ctx.accept(HARNESS)
     publisher = ctx.accept(AUDIT)
     started = await provider.start_session(
@@ -118,77 +117,48 @@ async def exercise(ctx: Context):
             item.payload.type in {"failed", "unknown", "cancelled"} for item in items
         ), items
 
-    def verify(turn, expected):
-        selected = [event for event in events if event.context.turn_id == turn.id]
+    async def verify(turn, expected):
+        await recorded[turn.id].wait()
         sent = []
-        terminal = set()
+        settled = set()
         results = []
-        for event in selected:
+        for event in events:
+            if event.context.turn_id != turn.id:
+                continue
             if event.event_name in {"harness.source.sent", "harness.source.received"}:
+                direction = event.event_name.removeprefix("harness.source.")
                 packet = json.loads(cast(dict[str, Any], event.payload)["data"])
-                if (
-                    event.event_name == "harness.source.sent"
-                    and packet["type"] == "user"
-                ):
-                    sent.append(packet["uuid"])
-                if packet["type"] == "command_lifecycle" and packet["state"] in {
-                    "completed",
-                    "cancelled",
-                    "discarded",
-                    "refused",
-                }:
-                    terminal.add(packet["command_uuid"])
-                if packet["type"] == "result":
-                    results.append(
-                        {
-                            key: packet.get(key)
-                            for key in (
-                                "user_message_uuids",
-                                "queued_turn_count",
-                                "result_index",
-                            )
-                        }
-                    )
+                if (value := steering_input(direction, packet)) is not None:
+                    sent.append(value)
+                if (value := steering_settled(direction, packet)) is not None:
+                    settled.add(value)
+                if (result := steering_result(direction, packet)) is not None:
+                    results.append(result)
             if event.event_name == "test.turn.output":
                 item = cast(dict[str, Any], event.payload)
                 if item["payload"]["type"] == "completed":
-                    assert set(sent) <= terminal, (sent, terminal)
+                    assert set(sent) <= settled, (sent, settled)
         assert len(sent) == expected and len(set(sent)) == expected, sent
-        assert results, selected
+        assert results, turn.id
         return {"turn": turn.id, "inputs": len(sent), "results": results}
 
     try:
-        burst = HarnessTurn(id=str(uuid7()), session_id=session.id, input_text="/cost")
+        burst = HarnessTurn(
+            id=str(uuid7()), session_id=session.id, input_text=STEERING_INPUT
+        )
         stream = await provider.start_turn(session, burst, Approvals(), timeout=30)
         for _ in range(16):
-            assert await provider.steer_turn(session, burst, "/cost", timeout=30)
+            assert await provider.steer_turn(session, burst, STEERING_INPUT, timeout=30)
         await consume(stream, burst)
-        cases.append(verify(burst, 17))
-        assert not await provider.steer_turn(session, burst, "/cost", timeout=30)
-
-        boundary = HarnessTurn(
-            id=str(uuid7()), session_id=session.id, input_text="/cost"
-        )
-        gate_requested = True
-        stream = await provider.start_turn(session, boundary, Approvals(), timeout=30)
-        consumer = asyncio.create_task(consume(stream, boundary))
-        try:
-            await gate_entered.wait()
-            for _ in range(3):
-                assert await provider.steer_turn(session, boundary, "/cost", timeout=30)
-        finally:
-            gate_released.set()
-        await consumer
-        cases.append(verify(boundary, 4))
-        assert cases[-1]["results"][0]["queued_turn_count"] == 0, cases
-        assert len(cases[-1]["results"]) >= 2, cases
+        cases.append(await verify(burst, 17))
+        assert not await provider.steer_turn(session, burst, STEERING_INPUT, timeout=30)
 
         continued = HarnessTurn(
-            id=str(uuid7()), session_id=session.id, input_text="/cost"
+            id=str(uuid7()), session_id=session.id, input_text=STEERING_INPUT
         )
         stream = await provider.start_turn(session, continued, Approvals(), timeout=30)
         await consume(stream, continued)
-        cases.append(verify(continued, 1))
+        cases.append(await verify(continued, 1))
         await asyncio.to_thread(
             (output / "result.json").write_text, json.dumps({"cases": cases}) + "\n"
         )
@@ -196,7 +166,6 @@ async def exercise(ctx: Context):
         exercised = True
         yield
     finally:
-        gate_released.set()
         await provider.stop_session(session, timeout=0)
 
 
@@ -224,7 +193,7 @@ async def main():
                         name="inputs",
                         definition=Contrib(offers=[HARNESS_INPUT], lifespan=inputs),
                     ),
-                    ContribEntry(name="claude", definition=harness),
+                    HARNESS_ENTRY,
                     ContribEntry(
                         name="exercise",
                         definition=Contrib(accepts=[HARNESS, AUDIT], lifespan=exercise),

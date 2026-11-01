@@ -12,7 +12,8 @@ from typing import Any, cast
 from uuid import uuid7
 
 import psutil
-from bazaar_contrib_audit import AUDIT, AUDIT_EVENT, AuditContext, AuditEvent, audit
+from audit_hold import held_audit
+from bazaar_contrib_audit import AUDIT, AUDIT_EVENT, AuditContext, AuditEvent
 from bazaar_contrib_harness import (
     HARNESS,
     HARNESS_INPUT,
@@ -32,8 +33,8 @@ from bazaar_core import (
     load,
 )
 from blockbuster import blockbuster_ctx
-
-from bazaar_contrib_claude_code import harness
+from provider import EXIT_CLOSES_SOURCE, HARNESS_ENTRY, session_processes
+from pydantic import JsonValue
 
 root = Path(sys.argv[1]).resolve()
 workspace = Path(sys.argv[2]).resolve()
@@ -49,17 +50,6 @@ cancelled_stop = False
 
 
 async def record(ctx: Context, event: AuditEvent):
-    global close_cancelled
-    if (
-        event.event_name == "harness.source.closed"
-        and event.context.session_id == race_session_id
-    ):
-        close_entered.set()
-        try:
-            await close_released.wait()
-        except asyncio.CancelledError:
-            close_cancelled = True
-            raise
     events.append(event)
 
     def append():
@@ -67,6 +57,17 @@ async def record(ctx: Context, event: AuditEvent):
             stream.write(event.model_dump_json() + "\n")
 
     await asyncio.to_thread(append)
+
+
+async def hold(event_name: str, context: AuditContext, payload: JsonValue) -> None:
+    global close_cancelled
+    if event_name == "harness.source.closed" and context.session_id == race_session_id:
+        close_entered.set()
+        try:
+            await close_released.wait()
+        except asyncio.CancelledError:
+            close_cancelled = True
+            raise
 
 
 @asynccontextmanager
@@ -100,25 +101,34 @@ async def exercise(ctx: Context):
         payload={"budget": 0},
     )
 
+    parent = await asyncio.to_thread(psutil.Process)
+    environment = dict(os.environ)
+    existing = {
+        process.pid
+        for process in await asyncio.to_thread(session_processes, parent, environment)
+    }
     race_session_id = str(uuid7())
     result = await provider.start_session(
         SessionInput(id=race_session_id, workspace=workspace), timeout=30
     )
     assert result.value is not None, result
     session = result.value
-    processes = await asyncio.to_thread(
-        lambda: [
-            process
-            for process in psutil.Process().children(recursive=True)
-            if f"--session-id={session.provider_thread_id}" in process.cmdline()
-        ]
-    )
+    processes = [
+        process
+        for process in await asyncio.to_thread(session_processes, parent, environment)
+        if process.pid not in existing
+    ]
     assert len(processes) == 1, [process.pid for process in processes]
     await asyncio.to_thread(processes[0].terminate)
     try:
-        # The real watcher is publishing its close when the owner stops it.
-        await close_entered.wait()
-        await provider.stop_session(session, timeout=0)
+        if EXIT_CLOSES_SOURCE:
+            # The real watcher is publishing its close when the owner stops it.
+            await close_entered.wait()
+            await provider.stop_session(session, timeout=0)
+        else:
+            # The zero-budget stop returns while its own close is publishing.
+            await provider.stop_session(session, timeout=0)
+            await close_entered.wait()
     finally:
         close_released.set()
 
@@ -141,7 +151,7 @@ async def main():
         hub.enable(
             Composition(
                 entries=(
-                    ContribEntry(name="audit", definition=audit),
+                    ContribEntry(name="audit", definition=held_audit(hold)),
                     *timer.entries,
                     ContribEntry(
                         name="recorder",
@@ -151,15 +161,14 @@ async def main():
                 diagnostics=timer.diagnostics,
             )
         ),
-    ):
-        async with hub.enable(
+        hub.enable(
             Composition(
                 entries=(
                     ContribEntry(
                         name="inputs",
                         definition=Contrib(offers=[HARNESS_INPUT], lifespan=inputs),
                     ),
-                    ContribEntry(name="claude", definition=harness),
+                    HARNESS_ENTRY,
                     ContribEntry(
                         name="exercise",
                         definition=Contrib(
@@ -168,48 +177,50 @@ async def main():
                     ),
                 )
             )
-        ):
-            pass
-        messages = [
-            HarnessSourceEvent.model_validate(event.payload)
-            for event in events
-            if event.event_name in {"harness.source.sent", "harness.source.received"}
+        ),
+    ):
+        pass
+    # The recorder drains its queued audits while it stops.
+    messages = [
+        HarnessSourceEvent.model_validate(event.payload)
+        for event in events
+        if event.event_name in {"harness.source.sent", "harness.source.received"}
+    ]
+    closed = [
+        cast(dict[str, Any], event.payload)
+        for event in events
+        if event.event_name == "harness.source.closed"
+    ]
+    live = await asyncio.to_thread(
+        lambda: [
+            process.pid
+            for process in psutil.Process().children(recursive=True)
+            if process.is_running() and process.status() != psutil.STATUS_ZOMBIE
         ]
-        closed = [
-            cast(dict[str, Any], event.payload)
-            for event in events
-            if event.event_name == "harness.source.closed"
-        ]
-        live = await asyncio.to_thread(
-            lambda: [
-                process.pid
-                for process in psutil.Process().children(recursive=True)
-                if process.is_running() and process.status() != psutil.STATUS_ZOMBIE
-            ]
-        )
-        report = {
-            "source_messages": len(messages),
-            "closed": closed,
-            "close_audit_cancelled": close_cancelled,
-            "cancelled_stop": cancelled_stop,
-            "live_owned_children": live,
-        }
-        await asyncio.to_thread(
-            (output / "result.json").write_text, json.dumps(report) + "\n"
-        )
-        await asyncio.to_thread(print, json.dumps(report), flush=True)
-        assert messages and len(closed) == 3 and not close_cancelled, report
-        assert cancelled_stop, report
-        assert {message.source_id for message in messages} == {
-            source["source_id"] for source in closed
-        }, report
-        for source in closed:
-            assert [
-                message.sequence
-                for message in messages
-                if message.source_id == source["source_id"]
-            ] == list(range(1, source["sequence"] + 1)), report
-        assert not live, report
+    )
+    report = {
+        "source_messages": len(messages),
+        "closed": closed,
+        "close_audit_cancelled": close_cancelled,
+        "cancelled_stop": cancelled_stop,
+        "live_owned_children": live,
+    }
+    await asyncio.to_thread(
+        (output / "result.json").write_text, json.dumps(report) + "\n"
+    )
+    await asyncio.to_thread(print, json.dumps(report), flush=True)
+    assert messages and len(closed) == 3 and not close_cancelled, report
+    assert cancelled_stop, report
+    assert {message.source_id for message in messages} == {
+        source["source_id"] for source in closed
+    }, report
+    for source in closed:
+        assert [
+            message.sequence
+            for message in messages
+            if message.source_id == source["source_id"]
+        ] == list(range(1, source["sequence"] + 1)), report
+    assert not live, report
 
 
 with blockbuster_ctx():

@@ -1,4 +1,4 @@
-"""A real TCP Channel for isolated Claude Code bcc acceptance."""
+"""A real TCP Channel for isolated Harness bcc acceptance."""
 
 # Provider methods implement the public Harness call budgets.
 # ruff: noqa: ASYNC109
@@ -21,6 +21,7 @@ from bazaar_contrib_channel import (
     CHANNEL,
     CHANNEL_BUILDERS,
     CHANNEL_INPUT,
+    CHANNEL_TURN,
     ChannelApprovalRequest,
     ChannelBuilderConfig,
     ChannelConnectionError,
@@ -34,6 +35,7 @@ from bazaar_contrib_channel import (
     ChannelSendRequest,
     ChannelTarget,
     ChannelTargetPresentation,
+    ChannelTurn,
     DmAddress,
     DmRequest,
     InboundAttachment,
@@ -41,7 +43,7 @@ from bazaar_contrib_channel import (
     SenderIdentity,
     channel_builder_key,
 )
-from bazaar_contrib_harness import ApprovalResult, HarnessOutput, harness_builder_key
+from bazaar_contrib_harness import ApprovalResult, harness_builder_key
 from bazaar_contrib_timer import TIMER, Timer
 from bazaar_contrib_timer import timeout as timer_timeout
 from bazaar_core import Context, Contrib, ServiceKey
@@ -53,6 +55,7 @@ class ChannelConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     endpoint_file: str = "channel.json"
     audit_file: Path
+    harness: str
 
 
 class AuditJournal:
@@ -61,7 +64,7 @@ class AuditJournal:
         self.lock = asyncio.Lock()
 
 
-JOURNAL = ServiceKey[AuditJournal]("claude-test.audit-journal")
+JOURNAL = ServiceKey[AuditJournal]("test-channel.audit-journal")
 
 
 async def persist(ctx: Context, event: AuditEvent):
@@ -250,14 +253,6 @@ class TestChannel:
         while True:
             yield await self.inbound.get()
 
-    def accept_turn_event(self, event: HarnessOutput, *, target: ChannelTarget):
-        self.outbound.put_nowait(
-            {
-                "event": event.model_dump(mode="json"),
-                "target": target.model_dump(mode="json"),
-            }
-        )
-
     async def prepare_send(
         self, request: ChannelSendRequest
     ) -> tuple[ChannelSendPart, ...]:
@@ -352,7 +347,7 @@ async def channel_lifespan(ctx: Context, config: ChannelConfig):
     input = ctx.accept(CHANNEL_INPUT)
     ctx.accept(JOURNAL).paths[input.agent_id] = config.audit_file
     async with timer_timeout(ctx.accept(TIMER), 30_000):
-        inspection = await ctx.accept(harness_builder_key("claudecode")).inspect(
+        inspection = await ctx.accept(harness_builder_key(config.harness)).inspect(
             input.workspace, timeout=30
         )
     await ctx.accept(AUDIT).publish(
@@ -393,12 +388,25 @@ async def channel_lifespan(ctx: Context, config: ChannelConfig):
             )
 
 
+def turn(ctx: Context, value: ChannelTurn) -> None:
+    cast(TestChannel, ctx.accept(CHANNEL)).outbound.put_nowait(
+        {
+            "event": value.event.model_dump(mode="json"),
+            "target": value.target.model_dump(mode="json"),
+        }
+    )
+
+
+def dependencies(config: ChannelConfig) -> list[ServiceKey[Any]]:
+    return [CHANNEL_INPUT, TIMER, harness_builder_key(config.harness), JOURNAL, AUDIT]
+
+
 channel = Contrib(
     config=ChannelConfig,
-    accepts=[CHANNEL_INPUT, TIMER, harness_builder_key("claudecode"), JOURNAL, AUDIT],
+    accepts=dependencies,
     offers=[CHANNEL],
     lifespan=channel_lifespan,
-    listen={AUDIT_EVENT: record},
+    listen={AUDIT_EVENT: record, CHANNEL_TURN: turn},
 )
 
 

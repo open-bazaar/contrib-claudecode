@@ -1,4 +1,4 @@
-"""Observe a real Claude Code turn using bcc in an isolated installed application."""
+"""Observe a real Harness turn using bcc in an isolated installed application."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import uuid7
 
+import provider
 import psutil
 import tomli_w
 from bazaar_contrib_audit import AuditEvent
@@ -25,22 +26,12 @@ from bazaar_contrib_harness import (
     ApprovalScope,
     HarnessSourceEvent,
 )
-from bcn_claude_test_channel import ChannelMessage
+from bcn_test_channel import ChannelMessage
 from pydantic import TypeAdapter
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("root", type=Path)
-parser.add_argument(
-    "scenario",
-    choices=(
-        "mcp-once",
-        "bcc",
-        "full-access",
-        "recovery",
-        "refresh",
-        "background",
-    ),
-)
+parser.add_argument("scenario", choices=provider.SCENARIOS)
 parser.add_argument("workspace", type=Path)
 arguments = parser.parse_args()
 root = arguments.root.resolve()
@@ -184,7 +175,7 @@ async def exercise():
                 pass
         record = {
             "node_pid": process.pid,
-            "claude_config_dir": environment["CLAUDE_CONFIG_DIR"],
+            "config_dir": environment[provider.HOME],
             "node_returncode": process.returncode,
             "live_owned_children": alive,
             "live_owned_processes": details,
@@ -233,6 +224,17 @@ async def exercise():
                 ),
             }
         print(json.dumps({"source_audit_coverage": source_coverage}), flush=True)
+
+    async def restart():
+        nonlocal process, writer, collector
+        await stop()
+        process = writer = collector = None
+        # Start from an empty node so unread messages from the previous run
+        # do not wake the agent again.
+        database = Path(environment["BCN_HOME"]) / ".bcn" / "bcn.sqlite3"
+        for suffix in ("", "-wal", "-shm"):
+            database.with_name(database.name + suffix).unlink(missing_ok=True)
+        await start()
 
     try:
         await start()
@@ -360,12 +362,8 @@ async def exercise():
                         started_tools.append({"kind": payload["type"], "call": call})
                     else:
                         previous_items.add(call["call_id"])
-                    command = (
-                        call["input"].get("command")
-                        if isinstance(call["input"], dict)
-                        else None
-                    )
-                    if isinstance(command, str) and re.search(
+                    command = provider.bcc_command(call)
+                    if command is not None and re.search(
                         r"\bbcc(?:\.cmd)?(?=[\s\"']|$)", command
                     ):
                         commands[call["call_id"]] = command
@@ -385,7 +383,7 @@ async def exercise():
                     and mcp
                     and call.get("call_id") not in previous_items
                     and payload.get("type") in {"tool.completed", "tool.failed"}
-                    and call.get("name") == "mcp__test__get_value"
+                    and call.get("name") == provider.MCP_TOOL
                 ):
                     terminal = event
                     completion = "mcp_result"
@@ -434,7 +432,7 @@ async def exercise():
             calls = [
                 tool
                 for tool in record["tools"]
-                if tool["call"].get("name") == "mcp__test__get_value"
+                if tool["call"].get("name") == provider.MCP_TOOL
             ]
             assert calls and all(tool["kind"] == "tool.completed" for tool in calls), (
                 record
@@ -446,15 +444,14 @@ async def exercise():
                 for tool in calls
             )
             assert any(
-                json.loads(tool["call"]["output"])
+                provider.mcp_output(tool["call"])
                 == {"key": arguments["key"], "value": "MCP_OK"}
                 for tool in calls
             ), record
             interactions = [
                 interaction
                 for interaction in record["interactions"]
-                if interaction["request"]["approval"]["action"]
-                == "mcp__test__get_value"
+                if interaction["request"]["approval"]["action"] == provider.MCP_APPROVAL
             ]
             if scope is None:
                 assert not interactions, interactions
@@ -492,12 +489,12 @@ async def exercise():
                     context = actual_context
                 assert actual_context == context, record
                 called = any(
-                    tool["call"].get("name") == "mcp__test__get_value"
+                    tool["call"].get("name") == provider.MCP_TOOL
                     for tool in record["started_tools"] + record["tools"]
                 )
                 approval_requested = any(
                     interaction["request"]["approval"]["action"]
-                    == "mcp__test__get_value"
+                    == provider.MCP_APPROVAL
                     for interaction in record["interactions"]
                 )
                 if called or approval_requested or retry == MCP_FEEDBACK_LIMIT:
@@ -528,7 +525,8 @@ async def exercise():
                 "No successful bcc call was observed; inspect the printed events"
             )
             assert any(
-                interaction["request"]["approval"]["action"] == "Bash"
+                interaction["request"]["approval"]["action"]
+                == provider.COMMAND_APPROVAL
                 for interaction in first["interactions"]
             ), "No native command approval reached the channel"
             assert first["steered"] and first["accepted_steering"]
@@ -540,7 +538,7 @@ async def exercise():
                 and continued["provider_thread"] == first["provider_thread"]
             )
             rejected = {
-                interaction["request"]["approval"]["request_id"]
+                provider.approval_call_id(interaction["request"]["approval"])
                 for interaction in continued["interactions"]
                 if interaction["decision"]["decision"] == "rejected"
             }
@@ -562,6 +560,46 @@ async def exercise():
                 note.read_text().strip() and first["outbound"] and first["bcc_calls"]
             ), first
 
+        elif scenario == "mcp-session":
+            first = await query_value(
+                "mcp-session",
+                "session-first",
+                ApprovalScope.SESSION,
+            )
+            remembered_session = await query_value(
+                "mcp-session-again",
+                "session-second",
+            )
+            assert remembered_session["session"] == first["session"]
+            assert remembered_session["provider_thread"] == first["provider_thread"]
+
+        elif scenario == "mcp-always":
+            first = await query_value(
+                "mcp-session",
+                "always-session",
+                ApprovalScope.SESSION,
+            )
+            (workspace / "AGENTS.md").write_text("Keep replies concise.\n")
+            await restart()
+            refreshed = await query_value(
+                "refreshed",
+                "always-first",
+                ApprovalScope.ALWAYS,
+            )
+            assert (
+                refreshed["session"] != first["session"]
+                and refreshed["provider_thread"] != first["provider_thread"]
+            )
+
+            (workspace / "AGENTS.md").write_text("Keep replies brief and clear.\n")
+            await restart()
+            remembered_always = await query_value(
+                "mcp-always",
+                "always-second",
+            )
+            assert remembered_always["session"] != refreshed["session"]
+            assert remembered_always["provider_thread"] != refreshed["provider_thread"]
+
         elif scenario == "recovery":
             assert process is not None
             await inbound("Please remember that I prefer brief replies.")
@@ -569,16 +607,7 @@ async def exercise():
             parent = psutil.Process(process.pid)
 
             def sessions():
-                return [
-                    child
-                    for child in parent.children()
-                    if any(
-                        value.startswith(("--session-id=", "--resume="))
-                        for value in child.cmdline()
-                    )
-                    and child.environ().get("CLAUDE_CONFIG_DIR")
-                    == environment["CLAUDE_CONFIG_DIR"]
-                ]
+                return provider.session_processes(parent, environment)
 
             servers = await asyncio.to_thread(sessions)
             assert len(servers) == 1, [child.cmdline() for child in servers]
@@ -614,7 +643,7 @@ async def exercise():
         elif scenario == "refresh":
             await inbound("Please remember that I prefer brief replies.")
             first = await finish("initial")
-            for name in ("AGENTS.md", "CLAUDE.md"):
+            for name in provider.INSTRUCTION_FILES:
                 (workspace / name).write_text("Keep replies concise.\n")
                 await asyncio.sleep(1)
                 await inbound("What reply style did I ask for? Please reply to me.")
@@ -687,9 +716,8 @@ async def exercise():
 
             initial_id = await inbound(
                 "Please start a local HTTP preview for the current folder. Run "
-                f"`python3 -m http.server {port} --bind 127.0.0.1` with the "
-                "Bash tool's `run_in_background` option, without a trailing "
-                "`&`. Keep that background task running after this turn. "
+                f"`python3 -m http.server {port} --bind 127.0.0.1` "
+                f"{provider.BACKGROUND} "
                 "Check that the preview responds, then use `bcc message send` "
                 "to send its address to this conversation."
             )
