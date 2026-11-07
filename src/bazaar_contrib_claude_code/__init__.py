@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import tomllib
 from contextlib import asynccontextmanager
+from importlib.resources import files
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -17,18 +19,30 @@ from bazaar_contrib_harness import (
 )
 from bazaar_contrib_timer import TIMER
 from bazaar_core import Context, Contrib
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from .inspection import inspect
 from .runtime import ClaudeCodeHarness
 
+_LOCALES = Path(str(files(__name__))) / "resources" / "locales"
+
 
 class Config(BaseModel):
-    model_config = ConfigDict(frozen=True)
-    model: str | None = None
-    effort: str | None = None
-    api_key: str | None = None
-    bedrock_api_key: str | None = None
+    model_config = ConfigDict(
+        frozen=True,
+        json_schema_extra={
+            "x-locales": {
+                path.stem: tomllib.loads(path.read_text(encoding="utf-8"))
+                for path in sorted(_LOCALES.glob("*.toml"))
+            }
+        },
+    )
+    model: str | None = Field(default=None, json_schema_extra={"x-inspect": "models"})
+    effort: str | None = Field(default=None, json_schema_extra={"x-inspect": "efforts"})
+    api_key: str | None = Field(default=None, json_schema_extra={"writeOnly": True})
+    bedrock_api_key: str | None = Field(
+        default=None, json_schema_extra={"writeOnly": True}
+    )
     bedrock_region: str | None = None
 
 
