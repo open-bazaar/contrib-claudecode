@@ -135,6 +135,12 @@ async def exercise():
         inspection = cast(dict[str, Any], found[-1])
         assert inspection["available"] and inspection["version"], inspection
         assert inspection["models"] and not inspection["error"], inspection
+        # the workspace's MCP server, with the tool it offers
+        assert any(
+            server["name"] == "test"
+            and any(tool["name"] == "get_value" for tool in server["tools"])
+            for server in inspection["mcp_servers"]
+        ), inspection
         reader, writer = await asyncio.open_connection(
             "127.0.0.1", json.loads(endpoint.read_text())["port"]
         )

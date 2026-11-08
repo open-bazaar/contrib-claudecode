@@ -1,4 +1,4 @@
-"""Ask the actual CLI for its version, models and workspace skills."""
+"""Ask the actual CLI for its version, models, workspace skills and MCP servers."""
 
 from __future__ import annotations
 
@@ -7,7 +7,15 @@ import shutil
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from bazaar_contrib_harness import HarnessInspection, HarnessModel
+from bazaar_contrib_harness import (
+    HarnessInspection,
+    HarnessMcpServer,
+    HarnessMcpTool,
+    HarnessModel,
+    McpAuth,
+    McpConnection,
+    McpFailed,
+)
 
 from .children import Children
 from .client import Client
@@ -51,11 +59,13 @@ async def inspect(workspace: Path, *, timeout: float) -> HarnessInspection:  # n
         await supervisor.start(timeout=timeout)
         initialized = await client.initialize(timeout=timeout)
         answer = await client.control({"subtype": "list_models"}, timeout=timeout)
+        servers = await client.control({"subtype": "mcp_status"}, timeout=timeout)
         return HarnessInspection(
             available=True,
             version=version,
             models=_read_models(answer.get("response")),
             skills=_read_skills(initialized),
+            mcp_servers=_read_mcp_servers(servers.get("response")),
         )
     except (ClaudeTransportError, OSError, TimeoutError) as error:
         return HarnessInspection(
@@ -104,3 +114,63 @@ def _read_models(response: object) -> tuple[HarnessModel, ...]:
             )
         )
     return tuple(models)
+
+
+# Claude Code's connection states as the common ones
+_CONNECTION = {
+    "connected": McpConnection.CONNECTED,
+    "pending": McpConnection.CONNECTING,
+    "disabled": McpConnection.DISABLED,
+}
+
+
+def _read_mcp_servers(response: object) -> tuple[HarnessMcpServer, ...]:
+    """Each MCP server as `mcp_status` gives it: its name, how its connection
+    stands, failed with the error it gives, a sign-in it still needs, and the
+    tools it offers, which Claude Code names without their schemas; it says
+    nothing of a sign-in otherwise."""
+
+    if not isinstance(response, Mapping):
+        return ()
+    items = response.get("mcpServers")
+    if not isinstance(items, Sequence):
+        return ()
+    servers: list[HarnessMcpServer] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        name = item.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        status = item.get("status")
+        error = item.get("error")
+        tools = item.get("tools")
+        servers.append(
+            HarnessMcpServer(
+                name=name,
+                connection=McpFailed(
+                    reason=error if isinstance(error, str) and error else "failed"
+                )
+                if status == "failed"
+                else _CONNECTION.get(status)
+                if isinstance(status, str)
+                else None,
+                auth=McpAuth.SIGNED_OUT if status == "needs-auth" else None,
+                tools=tuple(
+                    HarnessMcpTool(
+                        name=tool["name"],
+                        description=tool["description"]
+                        if isinstance(tool.get("description"), str)
+                        else None,
+                        input_schema=tool["inputSchema"]
+                        if isinstance(tool.get("inputSchema"), Mapping)
+                        else None,
+                    )
+                    for tool in tools
+                    if isinstance(tool, Mapping) and isinstance(tool.get("name"), str)
+                )
+                if isinstance(tools, Sequence)
+                else (),
+            )
+        )
+    return tuple(servers)
