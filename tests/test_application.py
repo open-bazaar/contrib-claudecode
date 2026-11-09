@@ -132,6 +132,7 @@ async def test_installed_application(
     )
     python = (await asyncio.to_thread((tmp_path / "python.log").read_text)).strip()
     root = tmp_path / scenario
+    workspace = shared_agent_root / "home" / ".bcn" / "workspaces" / "assistant"
     await execute(
         "bcc-prepare",
         str(python),
@@ -153,7 +154,7 @@ async def test_installed_application(
             str(python),
             str(source / "tests" / application),
             str(root),
-            str(shared_agent_root / "workspace"),
+            str(workspace),
         )
     await execute(
         "bcc",
@@ -161,5 +162,5 @@ async def test_installed_application(
         str(source / "tests/bcc_application.py"),
         str(root),
         scenario,
-        str(shared_agent_root / "workspace"),
+        str(workspace),
     )

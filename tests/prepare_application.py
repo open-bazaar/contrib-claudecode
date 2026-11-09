@@ -45,19 +45,22 @@ endpoint = (
 )
 home = agent_root / provider.HOME_DIRECTORY
 home.mkdir(parents=True, exist_ok=True)
-workspace = agent_root / "workspace"
-workspace.mkdir(parents=True, exist_ok=True)
 environment.update(
-    BCN_HOME=str(root / "home"),
+    BCN_HOME=str(agent_root / "home"),
     PATH=str(python.parent) + os.pathsep + os.environ["PATH"],
 )
+workspace = agent_root / "home" / ".bcn" / "workspaces" / "assistant"
+workspace.mkdir(parents=True, exist_ok=True)
+# Cases share the home for its workspace; each starts from an empty database.
+database = agent_root / "home" / ".bcn" / "bcn.sqlite3"
+for suffix in ("", "-wal", "-shm"):
+    database.with_name(database.name + suffix).unlink(missing_ok=True)
 environment[provider.HOME] = str(home)
 provider.configure(environment, home, workspace, python, model, scenario)
 agents = [
     {
         "id": "assistant",
         "name": "Assistant",
-        "workspace": str(workspace),
         "mode": "session",
         "channel": [
             {
