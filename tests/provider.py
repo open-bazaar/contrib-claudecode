@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import psutil
+from bazaar_contrib_harness import CommandDetail, ToolCallCompleted, ToolCallFailed
 from bazaar_core import ContribEntry
 
 from bazaar_contrib_claude_code import harness
@@ -77,12 +78,30 @@ def applications(scenario: str) -> tuple[str, ...]:
 
 
 def bcc_command(call: dict[str, Any]) -> str | None:
-    command = call["input"].get("command") if isinstance(call["input"], dict) else None
-    return command if isinstance(command, str) else None
+    detail = call["detail"]
+    return detail["command"] if detail["kind"] == "command" else None
 
 
-def mcp_output(call: dict[str, Any]) -> Any:
-    return json.loads(call["output"])
+def session_model(direction: str, packet: dict[str, Any]) -> str | None:
+    """The model a system/init line names; Claude Code sends one each time it
+    takes up an input."""
+    if (
+        direction == "received"
+        and packet["type"] == "system"
+        and packet["subtype"] == "init"
+    ):
+        return packet["model"]
+    return None
+
+
+def verify_call(payload: ToolCallCompleted | ToolCallFailed) -> None:
+    """A command gives its text, output and duration, but neither an exit code
+    nor a working directory, which Claude Code does not report."""
+    detail = payload.call.detail
+    if isinstance(detail, CommandDetail):
+        assert detail.command and detail.output is not None, payload
+        assert detail.exit_code is None and detail.cwd is None, payload
+        assert payload.call.duration_ms is not None, payload
 
 
 def approval_call_id(approval: dict[str, Any]) -> str:

@@ -5,21 +5,30 @@ import logging
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 from enum import StrEnum
-from time import time_ns
+from time import monotonic_ns, time_ns
 from typing import Self, cast
 
 from bazaar_contrib_harness import (
+    AgentDetail,
+    ChangeDetail,
+    ChangedFile,
+    CommandDetail,
     ContentDelta,
     ContentDeltaKind,
     ContextCompactionCompleted,
+    FileDetail,
     HarnessEventPayload,
     HarnessFailure,
     HarnessFailureReason,
     HarnessOutput,
+    McpDetail,
+    ModelUpdated,
+    OtherDetail,
     TokenUsage,
     ToolCall,
     ToolCallCompleted,
     ToolCallDeltaKind,
+    ToolCallDetail,
     ToolCallFailed,
     ToolCallStarted,
     ToolCallTextDelta,
@@ -28,6 +37,7 @@ from bazaar_contrib_harness import (
     TurnFailed,
     TurnStarted,
     UsageUpdated,
+    WebDetail,
 )
 from pydantic import JsonValue, TypeAdapter
 
@@ -80,7 +90,7 @@ class TurnEventStream:
         self._closed = False
         self._closed_callback_called = False
         self._pending: deque[HarnessOutput] = deque()
-        self._tool_names: dict[str, str] = {}
+        self._calls: dict[str, tuple[str, JsonValue, int]] = {}
         self._block_stream_ids: dict[int, str] = {}
         self._raw: JsonObject = {}
 
@@ -231,11 +241,15 @@ class TurnEventStream:
             raise ClaudeProtocolError(
                 "tool result content must be a JSON value"
             ) from error
+        name, input, started = self._calls.pop(call_id, (call_id, None, None))
         call = ToolCall(
             call_id=call_id,
-            name=self._tool_names.pop(call_id, call_id),
+            name=name,
             parent_call_id=_text(message.get("parent_tool_use_id")),
-            output=output,
+            duration_ms=None
+            if started is None
+            else (monotonic_ns() - started) // 1_000_000,
+            detail=_detail(name, input, output, message.get("tool_use_result")),
         )
         if is_error is True:
             return self._output_event(
@@ -249,7 +263,10 @@ class TurnEventStream:
         subtype = message.get("subtype")
         if subtype == "init":
             self._validate_cli_version(message)
-            return ()
+            model = _text(message.get("model"))
+            if model is None:
+                return ()
+            return (self._output_event(ModelUpdated(model=model)),)
         if subtype == "compact_boundary":
             return (
                 self._output_event(
@@ -260,6 +277,10 @@ class TurnEventStream:
             call_id = _text(message.get("task_id")) or _stream_id(message)
             if call_id is None:
                 return ()
+            description = _text(message.get("description"))
+            # Claude starts a task for any background work, a backgrounded
+            # Bash command too; only a subagent's is an agent call
+            task_type = _text(message.get("task_type"))
             return (
                 self._output_event(
                     ToolCallStarted(
@@ -267,7 +288,11 @@ class TurnEventStream:
                             call_id=call_id,
                             name="task",
                             parent_call_id=_text(message.get("parent_tool_use_id")),
-                            input=_text(message.get("summary")),
+                            detail=AgentDetail(description=description)
+                            if task_type == "local_agent"
+                            else OtherDetail(
+                                name=task_type or "task", input=description
+                            ),
                         )
                     )
                 ),
@@ -454,7 +479,7 @@ class TurnEventStream:
                     raise ClaudeProtocolError(
                         "tool use input must be a JSON value"
                     ) from error
-                self._tool_names[call_id] = name
+                self._calls[call_id] = (name, input, monotonic_ns())
                 items.append(
                     self._output_event(
                         ToolCallStarted(
@@ -462,7 +487,7 @@ class TurnEventStream:
                                 call_id=call_id,
                                 name=name,
                                 parent_call_id=_text(message.get("parent_tool_use_id")),
-                                input=input,
+                                detail=_detail(name, input),
                             )
                         )
                     )
@@ -556,7 +581,7 @@ class TurnEventStream:
         metadata: Mapping[str, JsonValue] | None = None,
     ) -> HarnessOutput:
         self._terminal_emitted = True
-        self._tool_names.clear()
+        self._calls.clear()
         self._block_stream_ids.clear()
         event = self._runtime_event(
             event_name=event_name,
@@ -577,6 +602,69 @@ class TurnEventStream:
 
 def _stream_id(message: Mapping[str, object]) -> str | None:
     return _text(message.get("parent_tool_use_id")) or _text(message.get("uuid"))
+
+
+def _detail(
+    name: str,
+    input: JsonValue,
+    output: JsonValue = None,
+    tool_use_result: object = None,
+) -> ToolCallDetail:
+    """A call as its tool_use asks for it and, once its tool_result arrives,
+    with what it gave back."""
+
+    match output:
+        case str():
+            text = output
+        case list():
+            text = (
+                "\n".join(
+                    part
+                    for block in output
+                    if isinstance(block, dict)
+                    and block.get("type") == "text"
+                    and isinstance(part := block.get("text"), str)
+                )
+                or None
+            )
+        case _:
+            text = None
+    match name, input:
+        case "Bash", {"command": str(command)} as arguments:
+            return CommandDetail(
+                command=command,
+                description=_text(arguments.get("description")),
+                output=text,
+            )
+        case "Read", {"file_path": str(path)}:
+            return FileDetail(action="read", path=path)
+        case ("Write" | "Edit", {"file_path": str(path)}) | (
+            "NotebookEdit",
+            {"notebook_path": str(path)},
+        ):
+            return ChangeDetail(
+                changes=(
+                    ChangedFile(
+                        path=path,
+                        kind="add"
+                        if isinstance(tool_use_result, Mapping)
+                        and tool_use_result.get("type") == "create"
+                        else "update",
+                    ),
+                )
+            )
+        case "WebFetch", {"url": str(url)}:
+            return WebDetail(action="open", url=url)
+        case "WebSearch", {"query": str(query)}:
+            return WebDetail(action="search", query=query)
+        # `Task` is the name the init message lists the Agent tool under
+        case "Agent" | "Task", {"description": str(description)}:
+            return AgentDetail(description=description)
+        case _ if name.startswith("mcp__"):
+            server, _, tool = name.removeprefix("mcp__").partition("__")
+            return McpDetail(server=server, tool=tool, arguments=input, result=text)
+        case _:
+            return OtherDetail(name=name, input=input, output=output)
 
 
 def _token_usage(usage: Mapping[str, object]) -> TokenUsage:
