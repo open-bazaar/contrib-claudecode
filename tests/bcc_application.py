@@ -24,7 +24,11 @@ from bazaar_contrib_channel import ChannelApprovalRequest, ChannelTarget, Sender
 from bazaar_contrib_harness import (
     ApprovalResult,
     ApprovalScope,
+    HarnessOutput,
     HarnessSourceEvent,
+    ModelUpdated,
+    ToolCallCompleted,
+    ToolCallFailed,
 )
 from bcn_test_channel import ChannelMessage
 from pydantic import TypeAdapter
@@ -191,6 +195,9 @@ async def exercise():
         assert not alive, record
         sources: dict[str, list[HarnessSourceEvent]] = {}
         closed: dict[str, dict[str, Any]] = {}
+        answered: dict[str | None, set[str]] = {}
+        reported: dict[str | None, set[str]] = {}
+        turns: set[tuple[str | None, str | None]] = set()
         for line in (root / "audit.jsonl").read_text().splitlines():
             audit = AUDIT_EVENT.validate_json(line)
             if audit.event_name in {"harness.source.sent", "harness.source.received"}:
@@ -199,10 +206,35 @@ async def exercise():
                 assert audit.event_name == f"harness.source.{source.direction}"
                 assert audit.context.session_id
                 assert audit.observed_at_ms >= source.occurred_at_ms
+                model = provider.session_model(
+                    source.direction, json.loads(source.data)
+                )
+                if model is not None:
+                    answered.setdefault(audit.context.session_id, set()).add(model)
             elif audit.event_name == "harness.source.closed":
                 payload = cast(dict[str, Any], audit.payload)
                 closed[payload["source_id"]] = payload
+            elif audit.event_name in {
+                "harness.content.delta",
+                "harness.tool.started",
+                "harness.completed",
+            }:
+                turns.add((audit.context.session_id, audit.context.turn_id))
+            elif audit.event_name == "harness.model.updated":
+                update = HarnessOutput.model_validate(audit.payload).payload
+                assert isinstance(update, ModelUpdated), audit
+                reported.setdefault(audit.context.turn_id, set()).add(update.model)
+            elif audit.event_name in {"harness.tool.completed", "harness.tool.failed"}:
+                call = HarnessOutput.model_validate(audit.payload).payload
+                assert isinstance(call, (ToolCallCompleted, ToolCallFailed)), audit
+                provider.verify_call(call)
         assert sources and set(sources) == set(closed)
+        # every turn that got to work names the model its session's runtime
+        # answered with; one stopped as it starts may not have been told yet
+        assert turns and all(
+            reported.get(turn) and reported[turn] <= answered.get(session, set())
+            for session, turn in turns
+        ), (turns, reported, answered)
         source_coverage = {}
         for source_id, messages in sources.items():
             messages.sort(key=lambda event: event.sequence)
@@ -444,15 +476,20 @@ async def exercise():
                 record
             )
             assert any(
-                started["call"]["input"] == arguments
-                and started["call"]["call_id"] == tool["call"]["call_id"]
+                started["call"]["call_id"] == tool["call"]["call_id"]
+                and started["call"]["detail"]["arguments"] == arguments
                 for started in record["started_tools"]
                 for tool in calls
             )
+            # the test server's tool, the arguments it was called with and the
+            # text of the value it returned
             assert any(
-                provider.mcp_output(tool["call"])
+                (detail["server"], detail["tool"], detail["arguments"])
+                == ("test", "get_value", arguments)
+                and json.loads(detail["result"])
                 == {"key": arguments["key"], "value": "MCP_OK"}
                 for tool in calls
+                for detail in (tool["call"]["detail"],)
             ), record
             interactions = [
                 interaction
