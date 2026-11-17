@@ -71,6 +71,9 @@ async def exercise():
     workspace = arguments.workspace.resolve()
     background = None
     preview_processes = {}
+    startup_failures = []
+    stderr = []
+    interrupted = False
     if scenario == "background":
         config = root / "node.toml"
         document = tomllib.loads(config.read_text())
@@ -104,9 +107,31 @@ async def exercise():
             yield json.loads(pending)
 
     async def collect(reader):
+        nonlocal interrupted
         async for packet in packets(reader):
             if "audit" in packet:
                 print(json.dumps({"phase": phase, **packet}), flush=True)
+                if packet["audit"]["event_name"] == "harness.source.stderr":
+                    data = packet["audit"]["payload"]["data"]
+                    stderr.append(data)
+                    if (
+                        scenario == "startup-recovery"
+                        and not interrupted
+                        and "unsupported-startup-effort" in data
+                    ):
+                        interrupted = True
+                        assert process is not None
+                        parent = await asyncio.to_thread(psutil.Process, process.pid)
+                        servers = await asyncio.to_thread(
+                            provider.session_processes, parent, environment
+                        )
+                        assert len(servers) == 1, servers
+                        await asyncio.to_thread(servers[0].terminate)
+                if (
+                    scenario == "startup-recovery"
+                    and packet["audit"]["event_name"] == "harness.session.failed"
+                ):
+                    startup_failures.append(packet["audit"]["payload"]["failure"])
             await queue.put(packet)
         await queue.put(None)
 
@@ -139,12 +164,13 @@ async def exercise():
         inspection = cast(dict[str, Any], found[-1])
         assert inspection["available"] and inspection["version"], inspection
         assert inspection["models"] and not inspection["error"], inspection
-        # the workspace's MCP server, with the tool it offers
-        assert any(
-            server["name"] == "test"
-            and any(tool["name"] == "get_value" for tool in server["tools"])
-            for server in inspection["mcp_servers"]
-        ), inspection
+        if scenario != "startup-recovery":
+            # the workspace's MCP server, with the tool it offers
+            assert any(
+                server["name"] == "test"
+                and any(tool["name"] == "get_value" for tool in server["tools"])
+                for server in inspection["mcp_servers"]
+            ), inspection
         reader, writer = await asyncio.open_connection(
             "127.0.0.1", json.loads(endpoint.read_text())["port"]
         )
@@ -231,7 +257,9 @@ async def exercise():
         assert sources and set(sources) == set(closed)
         # every turn that got to work names the model its session's runtime
         # answered with; one stopped as it starts may not have been told yet
-        assert turns and all(
+        if scenario != "startup-recovery":
+            assert turns
+        assert all(
             reported.get(turn) and reported[turn] <= answered.get(session, set())
             for session, turn in turns
         ), (turns, reported, answered)
@@ -242,7 +270,10 @@ async def exercise():
                 range(1, closed[source_id]["sequence"] + 1)
             )
             directions = {event.direction for event in messages}
-            assert directions == {"sent", "received"}
+            if scenario == "startup-recovery" and closed[source_id]["returncode"] != 0:
+                assert "sent" in directions
+            else:
+                assert directions == {"sent", "received"}
             assert all(
                 previous.monotonic_ns <= current.monotonic_ns
                 for previous, current in pairwise(messages)
@@ -555,7 +586,24 @@ async def exercise():
                 phase = f"{label}-retry-{retry}"
                 input_message_id = await inbound(feedback)
 
-        if scenario == "mcp-once":
+        if scenario == "startup-recovery":
+            input_message_id = await inbound("你好，先跟我打个招呼吧。")
+            first = await finish(
+                "startup-recovery",
+                stop_at_started=True,
+                input_message_id=input_message_id,
+            )
+            assert startup_failures, "The real CLI did not exercise startup failure"
+            assert all(
+                failure["reason"] == "connection_lost"
+                and failure["code"] is not None
+                and not failure["needs_reconciliation"]
+                for failure in startup_failures
+            ), startup_failures
+            data = "".join(stderr)
+            assert "unsupported-startup-effort" in data, stderr
+            assert first["provider_thread"], first
+        elif scenario == "mcp-once":
             first = await query_value(
                 "mcp-once",
                 "once",

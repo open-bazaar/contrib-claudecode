@@ -100,7 +100,7 @@ def parse_control_response(envelope: Mapping[str, object]) -> JsonObject:
     return dict(response)
 
 
-def failure(error: BaseException) -> HarnessFailure:
+def failure(error: BaseException, *, needs_reconciliation: bool) -> HarnessFailure:
     if isinstance(error, ClaudeControlError):
         reason = HarnessFailureReason.EXECUTION
     elif isinstance(error, ClaudeProtocolError):
@@ -116,11 +116,13 @@ def failure(error: BaseException) -> HarnessFailure:
     return HarnessFailure(
         reason,
         str(error) or type(error).__name__,
-        needs_reconciliation=reason
+        needs_reconciliation=needs_reconciliation
+        and reason
         in {
             HarnessFailureReason.TIMEOUT,
             HarnessFailureReason.CONNECTION_LOST,
         },
+        code=error.returncode if isinstance(error, ClaudeProcessExited) else None,
     )
 
 

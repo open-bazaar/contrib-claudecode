@@ -19,6 +19,13 @@ class SourceAudit:
         self.turn_id: str | None = None
         self.closed = False
 
+    async def stderr(self, data: str) -> None:
+        await self.audit.publish(
+            "harness.source.stderr",
+            context=self.context.model_copy(update={"turn_id": self.turn_id}),
+            payload={"provider": "claudecode", "source_id": self.id, "data": data},
+        )
+
     async def publish(self, data: str, direction: Literal["sent", "received"]) -> None:
         occurred_at_ms = time_ns() // 1_000_000
         self.sequence += 1

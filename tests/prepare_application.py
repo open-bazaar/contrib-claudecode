@@ -72,6 +72,9 @@ agents = [
         "harness": [{"kind": provider.KIND, "model": model}],
     }
 ]
+if scenario == "startup-recovery":
+    # Observe the real CLI warning before interrupting its first start.
+    agents[0]["harness"][0]["effort"] = "unsupported-startup-effort"
 if scenario == "mcp-once":
     environment[provider.API_KEY] = "inherited-key-overridden-by-config"
     agents[0]["harness"][0]["api_key"] = environment["AI_API_KEY"]
