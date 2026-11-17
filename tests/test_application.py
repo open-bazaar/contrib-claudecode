@@ -20,10 +20,12 @@ async def test_installed_application(
     shared_agent_root: Path,
 ):
     model = pytestconfig.getoption("--model")
-    if (
-        not model
-        or not os.environ.get("AI_GATEWAY_BASE_URL")
-        or not os.environ.get("AI_API_KEY")
+    if not model or (
+        scenario != "startup-recovery"
+        and (
+            not os.environ.get("AI_GATEWAY_BASE_URL")
+            or not os.environ.get("AI_API_KEY")
+        )
     ):
         pytest.skip(
             "Supply --model and setup-ai-gateway's environment for real inference"
@@ -111,7 +113,7 @@ async def test_installed_application(
         "tool",
         "install",
         "--python",
-        "3.15",
+        sys.executable,
         "--prerelease",
         "allow",
         "--refresh",

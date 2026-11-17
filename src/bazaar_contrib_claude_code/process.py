@@ -402,9 +402,10 @@ class ProcessSupervisor:
         reader = UnlimitedLineReader(stderr)
         try:
             while line := await reader.readline():
-                self._stderr_tail.append(
-                    line.decode("utf-8", errors="replace").rstrip("\r\n")
-                )
+                data = line.decode("utf-8", errors="replace")
+                self._stderr_tail.append(data.rstrip("\r\n"))
+                if self.source is not None:
+                    await self.source.stderr(data)
         except ConnectionError, OSError:
             return
 

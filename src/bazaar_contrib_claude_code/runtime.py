@@ -160,7 +160,7 @@ class ClaudeCodeHarness:
         except Exception as error:  # noqa: BLE001
             if connection is not None:
                 await self._stop_connection(connection, timeout=timeout)
-            return _provider_result(error)
+            return _provider_result(error, needs_reconciliation=False)
 
     async def reconcile_session(
         self,
@@ -216,7 +216,7 @@ class ClaudeCodeHarness:
         except Exception as error:  # noqa: BLE001
             if connection is not None:
                 await self._stop_connection(connection, timeout=timeout)
-            return _provider_result(error)
+            return _provider_result(error, needs_reconciliation=True)
 
     async def stop_session(
         self, session: HarnessSession, *, timeout: float
@@ -617,8 +617,13 @@ def _observe_background(connection: _Connection, message: dict[str, object]) -> 
     }
 
 
-def _provider_result(error: BaseException) -> ProviderCallResult[Any]:
-    return ProviderCallResult(status=ProviderCallStatus.FAILED, failure=failure(error))
+def _provider_result(
+    error: BaseException, *, needs_reconciliation: bool
+) -> ProviderCallResult[Any]:
+    return ProviderCallResult(
+        status=ProviderCallStatus.FAILED,
+        failure=failure(error, needs_reconciliation=needs_reconciliation),
+    )
 
 
 def _remaining(deadline: float) -> float:

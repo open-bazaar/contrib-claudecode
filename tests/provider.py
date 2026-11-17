@@ -19,7 +19,15 @@ HOME = "CLAUDE_CONFIG_DIR"
 HOME_DIRECTORY = "claude-config"
 API_KEY = "ANTHROPIC_API_KEY"
 PRIVATE = ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY")
-SCENARIOS = ("mcp-once", "bcc", "full-access", "recovery", "refresh", "background")
+SCENARIOS = (
+    "mcp-once",
+    "bcc",
+    "full-access",
+    "recovery",
+    "refresh",
+    "background",
+    "startup-recovery",
+)
 # Linux's native Claude sandbox cannot expose a preview port to the host.
 FULL_ACCESS = frozenset({"full-access", "background"})
 INSTRUCTION_FILES = ("AGENTS.md", "CLAUDE.md")
@@ -43,6 +51,9 @@ def configure(
     model: str,
     scenario: str,
 ) -> None:
+    if scenario == "startup-recovery":
+        (home / "settings.json").write_text("{}\n")
+        return
     environment.update(
         ANTHROPIC_BASE_URL=environment["AI_GATEWAY_BASE_URL"],
         ANTHROPIC_API_KEY=environment["AI_API_KEY"],
