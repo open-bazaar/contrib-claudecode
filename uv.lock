@@ -136,7 +136,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "bazaar-contrib-audit", specifier = "~=0.3.0rc10" },
-    { name = "bazaar-contrib-harness", specifier = "~=0.3.0rc23" },
+    { name = "bazaar-contrib-harness", specifier = "~=0.3.0rc34" },
     { name = "bazaar-contrib-timer", specifier = "~=0.3.0rc10" },
     { name = "bazaar-core", specifier = "~=0.3.0rc10" },
     { name = "psutil", specifier = ">=7.0.0" },
@@ -185,15 +185,15 @@ wheels = [
 
 [[package]]
 name = "bazaar-contrib-harness"
-version = "0.3.0rc23"
+version = "0.3.0rc34"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "bazaar-core" },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/80/d1/76406a4d51497b78bd8bb1cf7127a7ba4d7be7e8d6c247b5c8640fd31135/bazaar_contrib_harness-0.3.0rc23.tar.gz", hash = "sha256:44433528d49a2a9829b3f5adc353c9ebbd8c5f33e5c5e9f69dbac2ff63f8f1ad", size = 11053, upload-time = "2026-11-09T01:17:27.207Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/5f/b2/544992fc4572982bbbc7d77de60107aca4756c468dcb1099620637454150/bazaar_contrib_harness-0.3.0rc34.tar.gz", hash = "sha256:ba17556c44e4808ce9ddb21292cecdaaa47c2b760eafc6ba2b445c0599aadfcb", size = 11209, upload-time = "2026-11-19T03:14:12.667Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/21/7c/99f479d320ec846dac254eaaf3673c80e2060445c4b30c2e62bafaecd502/bazaar_contrib_harness-0.3.0rc23-py3-none-any.whl", hash = "sha256:e46adf3580c6d24df1e9b0e91ba2f3292997b9b3926359d1f42a653a6d8e4015", size = 14134, upload-time = "2026-11-09T01:17:26.275Z" },
+    { url = "https://files.pythonhosted.org/packages/65/67/0816dcbd320da571042cc4f0d0cb289a077171d82b5928b613546fd03f8c/bazaar_contrib_harness-0.3.0rc34-py3-none-any.whl", hash = "sha256:17e1306c6c26103375eb7eb25d2def027dda7b0b2db15422fcbd41221a204e90", size = 14317, upload-time = "2026-11-19T03:14:11.666Z" },
 ]
 
 [[package]]

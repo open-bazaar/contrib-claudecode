@@ -11,6 +11,7 @@ import shutil
 from dataclasses import dataclass, field
 from importlib.metadata import version
 from pathlib import Path
+from time import time_ns
 from typing import Any
 from uuid import uuid4
 
@@ -32,7 +33,9 @@ from bazaar_contrib_harness import (
     SessionInput,
 )
 from bazaar_contrib_timer import Timer
+from pydantic import AwareDatetime, BaseModel, ValidationError
 from watchfiles import awatch
+lazy from bazaar_contrib_harness import QuotaSnapshot, QuotaWindow
 
 from .approval import (
     build_approval_response,
@@ -69,6 +72,29 @@ class _Connection:
     active_stream: TurnEventStream | None = None
     active_background_task_ids: set[str] = field(default_factory=set)
     watch_task: asyncio.Task[None] | None = None
+
+
+class RateLimitWindow(BaseModel):
+    utilization: float | None
+    resets_at: AwareDatetime | None
+
+
+class ModelRateLimit(RateLimitWindow):
+    display_name: str
+
+
+class RateLimits(BaseModel):
+    five_hour: RateLimitWindow | None = None
+    seven_day: RateLimitWindow | None = None
+    seven_day_opus: RateLimitWindow | None = None
+    seven_day_sonnet: RateLimitWindow | None = None
+    seven_day_oauth_apps: RateLimitWindow | None = None
+    model_scoped: tuple[ModelRateLimit, ...] = ()
+
+
+class AccountUsage(BaseModel):
+    rate_limits_available: bool
+    rate_limits: RateLimits | None
 
 
 class ClaudeCodeHarness:
@@ -125,6 +151,79 @@ class ClaudeCodeHarness:
 
     async def receive_event(self) -> HarnessExpire:
         return await self._lifecycle_events.get()
+
+    async def read_quota(self) -> QuotaSnapshot | None:
+        executable = await asyncio.to_thread(shutil.which, "claude")
+        if executable is None:
+            return None
+        arguments = (
+            "-p",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--no-session-persistence",
+            "--strict-mcp-config",
+            "--settings",
+            '{"disableAllHooks":true}',
+        )
+        if self._model is not None:
+            arguments += ("--model", self._model)
+        supervisor = ProcessSupervisor(
+            ProcessSpec(
+                executable,
+                arguments,
+                self._input.workspace,
+                await self._environment({}),
+            ),
+            self._children,
+        )
+        client = Client(supervisor)
+        timeout = self._input.startup_timeout
+        try:
+            await supervisor.start(timeout=timeout)
+            await client.initialize(timeout=timeout)
+            result = await client.control(
+                {"subtype": "get_usage", "skip_behaviors": True}, timeout=timeout
+            )
+            usage = AccountUsage.model_validate(result.get("response"))
+            observed_at_ms = time_ns() // 1_000_000
+        except OSError, TimeoutError, ClaudeTransportError, ValidationError:
+            return None
+        finally:
+            try:
+                await client.close()
+            finally:
+                await supervisor.stop(timeout=self._input.shutdown_timeout)
+
+        if not usage.rate_limits_available or (limits := usage.rate_limits) is None:
+            return None
+        week = 7 * 24 * 60
+        windows = tuple(
+            QuotaWindow(
+                name=name,
+                duration_minutes=duration,
+                remaining_pct=max(0, 100 - window.utilization),
+                resets_at_ms=None
+                if window.resets_at is None
+                else int(window.resets_at.timestamp() * 1000),
+            )
+            for name, duration, window in (
+                (None, 5 * 60, limits.five_hour),
+                (None, week, limits.seven_day),
+                ("Opus", week, limits.seven_day_opus),
+                ("Sonnet", week, limits.seven_day_sonnet),
+                ("OAuth apps", week, limits.seven_day_oauth_apps),
+                *((model.display_name, week, model) for model in limits.model_scoped),
+            )
+            if window is not None and window.utilization is not None
+        )
+        return (
+            QuotaSnapshot(observed_at_ms=observed_at_ms, windows=windows)
+            if windows
+            else None
+        )
 
     async def start_session(
         self, request: SessionInput, *, timeout: float
@@ -376,6 +475,21 @@ class ClaudeCodeHarness:
                 or connection.client.provider_wake_active
             )
 
+    async def _environment(self, extra: dict[str, str]) -> dict[str, str]:
+        env = environment() | extra
+        if self._api_key is not None:
+            env["ANTHROPIC_API_KEY"] = self._api_key
+        if self._bedrock_api_key is not None:
+            env["CLAUDE_CODE_USE_BEDROCK"] = "1"
+            env["AWS_BEARER_TOKEN_BEDROCK"] = self._bedrock_api_key
+        if self._bedrock_region is not None:
+            env["AWS_REGION"] = self._bedrock_region
+        harness_version = await asyncio.to_thread(version, "bazaar-contrib-claude-code")
+        env["CLAUDE_AGENT_SDK_CLIENT_APP"] = (
+            f"bazaar-contrib-claude-code/{harness_version}"
+        )
+        return env
+
     async def _open_connection(
         self,
         session: SessionInput,
@@ -393,18 +507,7 @@ class ClaudeCodeHarness:
         )
         if os.name != "nt":
             await asyncio.to_thread(workspace.chmod, 0o700)
-        process_environment = environment() | session.environment
-        if self._api_key is not None:
-            process_environment["ANTHROPIC_API_KEY"] = self._api_key
-        if self._bedrock_api_key is not None:
-            process_environment["CLAUDE_CODE_USE_BEDROCK"] = "1"
-            process_environment["AWS_BEARER_TOKEN_BEDROCK"] = self._bedrock_api_key
-        if self._bedrock_region is not None:
-            process_environment["AWS_REGION"] = self._bedrock_region
-        harness_version = await asyncio.to_thread(version, "bazaar-contrib-claude-code")
-        process_environment["CLAUDE_AGENT_SDK_CLIENT_APP"] = (
-            f"bazaar-contrib-claude-code/{harness_version}"
-        )
+        process_environment = await self._environment(session.environment)
         deadline = asyncio.get_running_loop().time() + min(
             timeout, self._input.startup_timeout
         )
